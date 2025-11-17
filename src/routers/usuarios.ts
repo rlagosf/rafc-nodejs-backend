@@ -10,26 +10,50 @@ import { db } from '../db';
  */
 
 // ───────── Schemas ─────────
-const IdParam = z.object({ id: z.string().regex(/^\d+$/) });
-const RutParam = z.object({ rut_usuario: z.string().regex(/^\d{6,10}$/) });
+const IdParam = z.object({
+  id: z.coerce.number().int().positive(),
+});
 
-const CreateSchema = z.object({
-  nombre_usuario: z.string().trim().min(1),
-  rut_usuario: z.union([z.coerce.number().int().positive(), z.string().regex(/^\d{6,10}$/)]),
-  email: z.string().trim().email(),
-  password: z.string().min(6),
-  rol_id: z.coerce.number().int().positive(),
-  estado_id: z.coerce.number().int().positive()
-}).strict();
+// RUT numérico, pero aceptamos string y lo convertimos a número
+const RutParam = z.object({
+  rut_usuario: z.coerce.number().int().positive(),
+});
 
-const UpdateSchema = z.object({
-  nombre_usuario: z.string().trim().min(1).optional(),
-  rut_usuario: z.union([z.coerce.number().int().positive(), z.string().regex(/^\d{6,10}$/)]).optional(),
-  email: z.string().trim().email().optional(),
-  password: z.string().min(6).optional(),
-  rol_id: z.coerce.number().int().positive().optional(),
-  estado_id: z.coerce.number().int().positive().optional()
-}).strict();
+const PageQuery = z.object({
+  limit: z.coerce.number().int().positive().max(200).optional().default(50),
+  offset: z.coerce.number().int().nonnegative().optional().default(0),
+  q: z.string().trim().min(1).optional(), // búsqueda por nombre/email/rut
+});
+
+const CreateSchema = z
+  .object({
+    nombre_usuario: z.string().trim().min(1),
+    rut_usuario: z.union([
+      z.coerce.number().int().positive(),
+      z.string().regex(/^\d{6,10}$/),
+    ]),
+    email: z.string().trim().email(),
+    password: z.string().min(6),
+    rol_id: z.coerce.number().int().positive(),
+    estado_id: z.coerce.number().int().positive(),
+  })
+  .strict();
+
+const UpdateSchema = z
+  .object({
+    nombre_usuario: z.string().trim().min(1).optional(),
+    rut_usuario: z
+      .union([
+        z.coerce.number().int().positive(),
+        z.string().regex(/^\d{6,10}$/),
+      ])
+      .optional(),
+    email: z.string().trim().email().optional(),
+    password: z.string().min(6).optional(),
+    rol_id: z.coerce.number().int().positive().optional(),
+    estado_id: z.coerce.number().int().positive().optional(),
+  })
+  .strict();
 
 // whitelist
 const allowedKeys = new Set([
@@ -38,12 +62,14 @@ const allowedKeys = new Set([
   'email',
   'password',
   'rol_id',
-  'estado_id'
+  'estado_id',
 ]);
 
 function pickAllowed(body: Record<string, unknown>) {
   const out: Record<string, unknown> = {};
-  for (const k in body) if (allowedKeys.has(k)) out[k] = (body as any)[k];
+  for (const k in body) {
+    if (allowedKeys.has(k)) out[k] = (body as any)[k];
+  }
   return out;
 }
 
@@ -70,70 +96,125 @@ export default async function usuarios(app: FastifyInstance) {
   app.get('/health', async () => ({
     module: 'usuarios',
     status: 'ready',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   }));
 
-  // LIST
-  app.get('/', async (_req: FastifyRequest, reply: FastifyReply) => {
+  // ───────────────── LIST (con paginación y búsqueda) ─────────────────
+  app.get('/', async (req: FastifyRequest, reply: FastifyReply) => {
+    const parsed = PageQuery.safeParse((req as any).query);
+    const { limit, offset, q } = parsed.success
+      ? parsed.data
+      : { limit: 50, offset: 0, q: undefined };
+
     try {
-      const [rows] = await db.query(
-        'SELECT id, nombre_usuario, rut_usuario, email, rol_id, estado_id FROM usuarios ORDER BY nombre_usuario ASC, id ASC'
-      );
-      reply.send({ ok: true, items: rows });
+      let sql =
+        'SELECT id, nombre_usuario, rut_usuario, email, rol_id, estado_id FROM usuarios';
+      const args: any[] = [];
+
+      if (q) {
+        sql +=
+          ' WHERE nombre_usuario LIKE ? OR email LIKE ? OR CAST(rut_usuario AS CHAR) LIKE ?';
+        const like = `%${q}%`;
+        args.push(like, like, like);
+      }
+
+      sql += ' ORDER BY nombre_usuario ASC, id ASC LIMIT ? OFFSET ?';
+      args.push(limit, offset);
+
+      const [rows]: any = await db.query(sql, args);
+      reply.send({
+        ok: true,
+        items: rows,
+        limit,
+        offset,
+        count: rows?.length ?? 0,
+      });
     } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al listar usuarios', detail: err?.message });
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al listar usuarios',
+        detail: err?.message,
+      });
     }
   });
 
-  // GET by id
+  // ⚠️ IMPORTANTE: poner /rut/:rut_usuario ANTES de /:id para evitar conflictos de rutas
+
+  // ───────────────── GET by rut ─────────────────
+  app.get('/rut/:rut_usuario', async (req: FastifyRequest, reply: FastifyReply) => {
+    const parsed = RutParam.safeParse((req as any).params);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ ok: false, message: 'RUT inválido' });
+    }
+    const rut_usuario = parsed.data.rut_usuario;
+
+    try {
+      const [rows]: any = await db.query(
+        'SELECT id, nombre_usuario, rut_usuario, email, rol_id, estado_id FROM usuarios WHERE rut_usuario = ? ORDER BY id DESC',
+        [rut_usuario],
+      );
+      reply.send({ ok: true, items: rows });
+    } catch (err: any) {
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al buscar por RUT',
+        detail: err?.message,
+      });
+    }
+  });
+
+  // ───────────────── GET by id ─────────────────
   app.get('/:id', async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = IdParam.safeParse((req as any).params);
-    if (!parsed.success) return reply.code(400).send({ ok: false, message: 'ID inválido' });
-    const id = Number(parsed.data.id);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ ok: false, message: 'ID inválido' });
+    }
+    const id = parsed.data.id;
 
     try {
       const [rows]: any = await db.query(
         'SELECT id, nombre_usuario, rut_usuario, email, rol_id, estado_id FROM usuarios WHERE id = ? LIMIT 1',
-        [id]
+        [id],
       );
-      if (!rows || rows.length === 0) return reply.code(404).send({ ok: false, message: 'No encontrado' });
+      if (!rows || rows.length === 0) {
+        return reply
+          .code(404)
+          .send({ ok: false, message: 'No encontrado' });
+      }
       reply.send({ ok: true, item: rows[0] });
     } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al obtener usuario', detail: err?.message });
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al obtener usuario',
+        detail: err?.message,
+      });
     }
   });
 
-  // GET by rut
-  app.get('/rut/:rut_usuario', async (req: FastifyRequest, reply: FastifyReply) => {
-    const parsed = RutParam.safeParse((req as any).params);
-    if (!parsed.success) return reply.code(400).send({ ok: false, message: 'RUT inválido' });
-    const rut_usuario = parsed.data.rut_usuario;
-
-    try {
-      const [rows] = await db.query(
-        'SELECT id, nombre_usuario, rut_usuario, email, rol_id, estado_id FROM usuarios WHERE rut_usuario = ? ORDER BY id DESC',
-        [rut_usuario]
-      );
-      reply.send({ ok: true, items: rows });
-    } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al buscar por RUT', detail: err?.message });
-    }
-  });
-
-  // CREATE
+  // ───────────────── CREATE ─────────────────
   app.post('/', async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = CreateSchema.safeParse((req as any).body);
     if (!parsed.success) {
-      const detail = parsed.error.issues.map((iss: ZodIssue) =>
-        `${iss.path.join('.')}: ${iss.message}`
-      ).join('; ');
-      return reply.code(400).send({ ok: false, message: 'Payload inválido', detail });
+      const detail = parsed.error.issues
+        .map((iss: ZodIssue) => `${iss.path.join('.')}: ${iss.message}`)
+        .join('; ');
+      return reply
+        .code(400)
+        .send({ ok: false, message: 'Payload inválido', detail });
     }
 
     const data = normalizeForDB(pickAllowed(parsed.data));
     try {
+      // Hash de password con Argon2
       data.password = await argon2.hash(String(data.password));
-      const [result]: any = await db.query('INSERT INTO usuarios SET ?', [data]);
+
+      const [result]: any = await db.query('INSERT INTO usuarios SET ?', [
+        data,
+      ]);
 
       reply.code(201).send({
         ok: true,
@@ -142,33 +223,48 @@ export default async function usuarios(app: FastifyInstance) {
         rut_usuario: data.rut_usuario,
         email: data.email,
         rol_id: data.rol_id,
-        estado_id: data.estado_id
+        estado_id: data.estado_id,
       });
     } catch (err: any) {
       if (err?.errno === 1062) {
-        return reply.code(409).send({ ok: false, message: 'Usuario duplicado (email o RUT ya existe)' });
+        return reply.code(409).send({
+          ok: false,
+          message: 'Usuario duplicado (email o RUT ya existe)',
+        });
       }
-      reply.code(500).send({ ok: false, message: 'Error al crear usuario', detail: err?.message });
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al crear usuario',
+        detail: err?.message,
+      });
     }
   });
 
-  // UPDATE (parcial)
+  // ───────────────── UPDATE (parcial) ─────────────────
   app.put('/:id', async (req: FastifyRequest, reply: FastifyReply) => {
     const pid = IdParam.safeParse((req as any).params);
-    if (!pid.success) return reply.code(400).send({ ok: false, message: 'ID inválido' });
-    const id = Number(pid.data.id);
+    if (!pid.success) {
+      return reply
+        .code(400)
+        .send({ ok: false, message: 'ID inválido' });
+    }
+    const id = pid.data.id;
 
     const parsed = UpdateSchema.safeParse((req as any).body);
     if (!parsed.success) {
-      const detail = parsed.error.issues.map((iss: ZodIssue) =>
-        `${iss.path.join('.')}: ${iss.message}`
-      ).join('; ');
-      return reply.code(400).send({ ok: false, message: 'Payload inválido', detail });
+      const detail = parsed.error.issues
+        .map((iss: ZodIssue) => `${iss.path.join('.')}: ${iss.message}`)
+        .join('; ');
+      return reply
+        .code(400)
+        .send({ ok: false, message: 'Payload inválido', detail });
     }
 
     const changes = normalizeForDB(pickAllowed(parsed.data));
     if (Object.keys(changes).length === 0) {
-      return reply.code(400).send({ ok: false, message: 'No hay campos para actualizar' });
+      return reply
+        .code(400)
+        .send({ ok: false, message: 'No hay campos para actualizar' });
     }
 
     if (typeof changes.password === 'string') {
@@ -176,31 +272,61 @@ export default async function usuarios(app: FastifyInstance) {
     }
 
     try {
-      const [result]: any = await db.query('UPDATE usuarios SET ? WHERE id = ?', [changes, id]);
-      if (result.affectedRows === 0) return reply.code(404).send({ ok: false, message: 'No encontrado' });
+      const [result]: any = await db.query(
+        'UPDATE usuarios SET ? WHERE id = ?',
+        [changes, id],
+      );
+      if (result.affectedRows === 0) {
+        return reply
+          .code(404)
+          .send({ ok: false, message: 'No encontrado' });
+      }
 
       const { password, ...safe } = changes;
       reply.send({ ok: true, updated: { id, ...safe } });
     } catch (err: any) {
       if (err?.errno === 1062) {
-        return reply.code(409).send({ ok: false, message: 'Usuario duplicado (email o RUT ya existe)' });
+        return reply.code(409).send({
+          ok: false,
+          message: 'Usuario duplicado (email o RUT ya existe)',
+        });
       }
-      reply.code(500).send({ ok: false, message: 'Error al actualizar usuario', detail: err?.message });
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al actualizar usuario',
+        detail: err?.message,
+      });
     }
   });
 
-  // DELETE
+  // ───────────────── DELETE ─────────────────
   app.delete('/:id', async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = IdParam.safeParse((req as any).params);
-    if (!parsed.success) return reply.code(400).send({ ok: false, message: 'ID inválido' });
-    const id = Number(parsed.data.id);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ ok: false, message: 'ID inválido' });
+    }
+    const id = parsed.data.id;
 
     try {
-      const [result]: any = await db.query('DELETE FROM usuarios WHERE id = ?', [id]);
-      if (result.affectedRows === 0) return reply.code(404).send({ ok: false, message: 'No encontrado' });
+      const [result]: any = await db.query(
+        'DELETE FROM usuarios WHERE id = ?',
+        [id],
+      );
+      if (result.affectedRows === 0) {
+        return reply
+          .code(404)
+          .send({ ok: false, message: 'No encontrado' });
+      }
       reply.send({ ok: true, deleted: id });
     } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al eliminar usuario', detail: err?.message });
+      // Si en el futuro hay FKs que apunten a usuarios, acá podrías tratar errno 1451
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al eliminar usuario',
+        detail: err?.message,
+      });
     }
   });
 }

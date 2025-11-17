@@ -1,37 +1,190 @@
+// src/routers/prevision_medica.ts
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { db } from '../db';
 
-/** Tabla: prevision_medica | Campos: id, nombre (solo lectura) */
-const IdParam = z.object({ id: z.string().regex(/^\d+$/) });
+/**
+ * Tabla: prevision_medica
+ * Campos: id (PK), nombre (VARCHAR)
+ */
+
+const IdParam = z.object({
+  id: z.coerce.number().int().positive(),
+});
+
+const CreateSchema = z.object({
+  nombre: z.string().trim().min(3, 'El nombre debe tener al menos 3 caracteres'),
+});
+
+const UpdateSchema = z.object({
+  nombre: z.string().trim().min(3).optional(),
+});
 
 export default async function prevision_medica(app: FastifyInstance) {
+  // Health
   app.get('/health', async () => ({
     module: 'prevision_medica',
     status: 'ready',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   }));
 
-  app.get('/', async (_req: FastifyRequest, reply: FastifyReply) => {
+  // GET all
+  app.get('/', async (_req, reply) => {
     try {
-      const [rows] = await db.query('SELECT id, nombre FROM prevision_medica ORDER BY id ASC');
+      const [rows] = await db.query(
+        'SELECT id, nombre FROM prevision_medica ORDER BY id ASC'
+      );
       reply.send({ ok: true, items: rows });
     } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al listar prevision_medica', error: err?.message });
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al listar prevision_medica',
+        error: err?.message,
+      });
     }
   });
 
-  app.get('/:id', async (req: FastifyRequest, reply: FastifyReply) => {
-    const parsed = IdParam.safeParse((req as any).params);
-    if (!parsed.success) return reply.code(400).send({ ok: false, message: 'ID inválido' });
+  // GET by ID
+  app.get('/:id', async (req, reply) => {
+    const parsed = IdParam.safeParse(req.params);
+    if (!parsed.success)
+      return reply.code(400).send({ ok: false, message: 'ID inválido' });
 
-    const id = Number(parsed.data.id);
+    const id = parsed.data.id;
+
     try {
-      const [rows]: any = await db.query('SELECT id, nombre FROM prevision_medica WHERE id = ? LIMIT 1', [id]);
-      if (!rows || rows.length === 0) return reply.code(404).send({ ok: false, message: 'No encontrado' });
+      const [rows]: any = await db.query(
+        'SELECT id, nombre FROM prevision_medica WHERE id = ? LIMIT 1',
+        [id]
+      );
+
+      if (!rows.length)
+        return reply.code(404).send({ ok: false, message: 'Previsión no encontrada' });
+
       reply.send({ ok: true, item: rows[0] });
     } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al obtener prevision_medica', error: err?.message });
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al obtener prevision_medica',
+        error: err?.message,
+      });
+    }
+  });
+
+  // POST crear
+  app.post('/', async (req, reply) => {
+    const parsed = CreateSchema.safeParse(req.body);
+    if (!parsed.success)
+      return reply.code(400).send({
+        ok: false,
+        message: parsed.error.issues[0]?.message || 'Datos inválidos',
+      });
+
+    const { nombre } = parsed.data;
+
+    try {
+      const [result]: any = await db.query(
+        'INSERT INTO prevision_medica (nombre) VALUES (?)',
+        [nombre]
+      );
+
+      reply.code(201).send({
+        ok: true,
+        id: result.insertId,
+        nombre,
+      });
+    } catch (err: any) {
+      if (err?.errno === 1062) {
+        return reply.code(409).send({
+          ok: false,
+          message: 'Ya existe una previsión con ese nombre',
+        });
+      }
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al crear prevision_medica',
+        error: err?.message,
+      });
+    }
+  });
+
+  // PUT actualizar
+  app.put('/:id', async (req, reply) => {
+    const p = IdParam.safeParse(req.params);
+    if (!p.success)
+      return reply.code(400).send({ ok: false, message: 'ID inválido' });
+
+    const id = p.data.id;
+
+    const parsed = UpdateSchema.safeParse(req.body);
+    if (!parsed.success)
+      return reply.code(400).send({
+        ok: false,
+        message: parsed.error.issues[0]?.message,
+      });
+
+    const { nombre } = parsed.data;
+    if (!nombre)
+      return reply.code(400).send({ ok: false, message: 'Nada para actualizar' });
+
+    try {
+      const [result]: any = await db.query(
+        'UPDATE prevision_medica SET nombre = ? WHERE id = ?',
+        [nombre, id]
+      );
+
+      if (result.affectedRows === 0)
+        return reply.code(404).send({ ok: false, message: 'No encontrado' });
+
+      reply.send({ ok: true, updated: { id, nombre } });
+    } catch (err: any) {
+      if (err?.errno === 1062) {
+        return reply.code(409).send({
+          ok: false,
+          message: 'Nombre duplicado',
+        });
+      }
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al actualizar prevision_medica',
+        error: err?.message,
+      });
+    }
+  });
+
+  // DELETE eliminar
+  app.delete('/:id', async (req, reply) => {
+    const p = IdParam.safeParse(req.params);
+    if (!p.success)
+      return reply.code(400).send({ ok: false, message: 'ID inválido' });
+
+    const id = p.data.id;
+
+    try {
+      const [result]: any = await db.query(
+        'DELETE FROM prevision_medica WHERE id = ?',
+        [id]
+      );
+
+      if (result.affectedRows === 0)
+        return reply.code(404).send({
+          ok: false,
+          message: 'No encontrado',
+        });
+
+      reply.send({ ok: true, deleted: id });
+    } catch (err: any) {
+      if (err?.errno === 1451) {
+        return reply.code(409).send({
+          ok: false,
+          message: 'No se puede eliminar: tiene registros asociados',
+        });
+      }
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al eliminar',
+        error: err?.message,
+      });
     }
   });
 }

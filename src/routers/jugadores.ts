@@ -5,20 +5,26 @@ import { db } from '../db';
 
 /**
  * jugadores.estadistica_id es UNIQUE y FK -> estadisticas.estadistica_id
- * Estrategia: insertamos jugador primero (estadistica_id = NULL),
- * usamos su insertId como estadistica_id, insertamos en estadisticas con ese id
- * y luego actualizamos jugadores.estadistica_id = insertId.
+ * Estrategia:
+ *  - Insertamos jugador primero (estadistica_id = NULL)
+ *  - Usamos su insertId como estadistica_id
+ *  - Insertamos en estadisticas con ese id
+ *  - Actualizamos jugadores.estadistica_id = insertId
  */
 
 // ───────── Schemas ─────────
-const IdParam = z.object({ id: z.string().regex(/^\d+$/) });
-const RutParam = z.object({
-  rut: z.string().regex(/^\d{7,8}$/, 'El RUT debe tener 7 u 8 dígitos (sin DV)'),
+const IdParam = z.object({
+  id: z.string().regex(/^\d+$/)
 });
+
+const RutParam = z.object({
+  rut: z.string().regex(/^\d{7,8}$/, 'El RUT debe tener 7 u 8 dígitos (sin DV)')
+});
+
 const PageQuery = z.object({
-  limit: z.coerce.number().int().positive().max(500).optional().default(100),
+  limit: z.coerce.number().int().positive().max(200).optional().default(100),
   offset: z.coerce.number().int().nonnegative().optional().default(0),
-  q: z.string().trim().min(1).optional(),
+  q: z.string().trim().min(1).max(100).optional(),  // proteges de strings gigantes
 });
 
 const BaseFields = {
@@ -66,7 +72,9 @@ const allowedKeys = new Set([
 
 function pickAllowed(body: Record<string, any>) {
   const out: Record<string, any> = {};
-  for (const k in body) if (allowedKeys.has(k)) out[k] = body[k];
+  for (const k in body) {
+    if (allowedKeys.has(k)) out[k] = body[k];
+  }
   return out;
 }
 
@@ -75,7 +83,7 @@ function coerceForDB(row: Record<string, any>) {
 
   const asInt = [
     'edad', 'posicion_id', 'categoria_id', 'establec_educ_id',
-    'prevision_medica_id', 'estado_id', 'rut_jugador', 'rut_apoderado', 'sucursal_id'
+    'prevision_medica_id', 'estado_id', 'rut_jugador', 'rut_apoderado', 'sucursal_id',
   ];
   for (const k of asInt) {
     if (k in out && out[k] !== null && out[k] !== undefined && out[k] !== '') {
@@ -83,6 +91,7 @@ function coerceForDB(row: Record<string, any>) {
       out[k] = Number.isNaN(n) ? null : n;
     }
   }
+
   const asFloat = ['peso', 'estatura'];
   for (const k of asFloat) {
     if (k in out && out[k] !== null && out[k] !== undefined && out[k] !== '') {
@@ -99,14 +108,19 @@ function coerceForDB(row: Record<string, any>) {
       const da = String(d.getUTCDate()).padStart(2, '0');
       out.fecha_nacimiento = `${y}-${m}-${da}`;
     } else if (typeof out.fecha_nacimiento === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(out.fecha_nacimiento)) {
-      // ok
+      // formato ya ok
     } else {
       delete out.fecha_nacimiento;
     }
   }
 
-  if (typeof out.email === 'string') out.email = out.email.trim().toLowerCase();
-  for (const k of Object.keys(out)) if (out[k] === '') out[k] = null;
+  if (typeof out.email === 'string') {
+    out.email = out.email.trim().toLowerCase();
+  }
+
+  for (const k of Object.keys(out)) {
+    if (out[k] === '') out[k] = null;
+  }
 
   delete (out as any).estadistica_id; // nunca desde el front
   return out;
@@ -141,12 +155,18 @@ function normalizeOut(row: any) {
 }
 
 export default async function jugadores(app: FastifyInstance) {
-  app.get('/health', async () => ({ module: 'jugadores', status: 'ready', timestamp: new Date().toISOString() }));
 
-  // Listar
+  app.get('/health', async () => ({
+    module: 'jugadores',
+    status: 'ready',
+    timestamp: new Date().toISOString()
+  }));
+
+  // ───────── Listar ─────────
   app.get('/', async (req: FastifyRequest, reply: FastifyReply) => {
-    const parsed = PageQuery.safeParse((req as any).query);
-    const { limit, offset, q } = parsed.success ? parsed.data : { limit: 200, offset: 0, q: undefined };
+    const parsed = PageQuery.safeParse(req.query);
+    const { limit, offset, q } = parsed.success ? parsed.data : { limit: 100, offset: 0, q: undefined };
+
     try {
       let sql =
         'SELECT id, rut_jugador, nombre_jugador, edad, email, telefono, peso, estatura, ' +
@@ -154,26 +174,55 @@ export default async function jugadores(app: FastifyInstance) {
         'posicion_id, categoria_id, establec_educ_id, prevision_medica_id, estado_id, ' +
         'observaciones, fecha_nacimiento, estadistica_id, sucursal_id ' +
         'FROM jugadores';
+
       const args: any[] = [];
+
       if (q) {
-        sql += ' WHERE nombre_jugador LIKE ? OR email LIKE ? OR rut_jugador LIKE ?';
-        args.push(`%${q}%`, `%${q}%`, `%${q}%`);
+        const isNumeric = /^\d+$/.test(q);
+
+        if (isNumeric) {
+          // Caso RUT: permite usar índice en rut_jugador por igualdad
+          sql += ' WHERE rut_jugador = ? OR nombre_jugador LIKE ? OR email LIKE ?';
+          args.push(Number(q), `%${q}%`, `%${q}%`);
+        } else {
+          sql += ' WHERE nombre_jugador LIKE ? OR email LIKE ?';
+          args.push(`%${q}%`, `%${q}%`);
+        }
       }
+
       sql += ' ORDER BY nombre_jugador ASC, id ASC LIMIT ? OFFSET ?';
       args.push(limit, offset);
 
       const [rows]: any = await db.query(sql, args);
-      reply.send({ ok: true, items: (rows || []).map(normalizeOut), limit, offset, count: rows?.length ?? 0 });
+
+      reply.send({
+        ok: true,
+        items: (rows || []).map(normalizeOut),
+        limit,
+        offset,
+        count: rows?.length ?? 0
+      });
+
     } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al listar jugadores', detail: err?.message });
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al listar jugadores',
+        detail: err?.message
+      });
     }
   });
 
-  // GET por RUT
+  // ───────── GET por RUT ─────────
   app.get('/rut/:rut', async (req: FastifyRequest, reply: FastifyReply) => {
-    const pr = RutParam.safeParse((req as any).params);
-    if (!pr.success) return reply.code(400).send({ ok: false, message: pr.error.issues[0]?.message || 'RUT inválido' });
+    const pr = RutParam.safeParse(req.params);
+    if (!pr.success) {
+      return reply.code(400).send({
+        ok: false,
+        message: pr.error.issues[0]?.message || 'RUT inválido'
+      });
+    }
     const rut = pr.data.rut;
+
     try {
       const [rows]: any = await db.query(
         'SELECT id, rut_jugador, nombre_jugador, edad, email, telefono, peso, estatura, ' +
@@ -183,18 +232,30 @@ export default async function jugadores(app: FastifyInstance) {
         'FROM jugadores WHERE rut_jugador = ? LIMIT 1',
         [rut]
       );
-      if (!rows || rows.length === 0) return reply.code(404).send({ ok: false, message: 'No encontrado' });
+
+      if (!rows || rows.length === 0) {
+        return reply.code(404).send({ ok: false, message: 'No encontrado' });
+      }
+
       reply.send({ ok: true, item: normalizeOut(rows[0]) });
+
     } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al buscar por RUT', detail: err?.message });
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al buscar por RUT',
+        detail: err?.message
+      });
     }
   });
 
-  // GET por ID
+  // ───────── GET por ID ─────────
   app.get('/:id', async (req: FastifyRequest, reply: FastifyReply) => {
-    const pid = IdParam.safeParse((req as any).params);
-    if (!pid.success) return reply.code(400).send({ ok: false, message: 'ID inválido' });
+    const pid = IdParam.safeParse(req.params);
+    if (!pid.success) {
+      return reply.code(400).send({ ok: false, message: 'ID inválido' });
+    }
     const id = Number(pid.data.id);
+
     try {
       const [rows]: any = await db.query(
         'SELECT id, rut_jugador, nombre_jugador, edad, email, telefono, peso, estatura, ' +
@@ -204,20 +265,29 @@ export default async function jugadores(app: FastifyInstance) {
         'FROM jugadores WHERE id = ? LIMIT 1',
         [id]
       );
-      if (!rows || rows.length === 0) return reply.code(404).send({ ok: false, message: 'No encontrado' });
+
+      if (!rows || rows.length === 0) {
+        return reply.code(404).send({ ok: false, message: 'No encontrado' });
+      }
+
       reply.send({ ok: true, item: normalizeOut(rows[0]) });
+
     } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al obtener jugador', detail: err?.message });
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al obtener jugador',
+        detail: err?.message
+      });
     }
   });
 
-  // Crear (anti-colisión de estadistica_id)
+  // ───────── Crear ─────────
   app.post('/', async (req: FastifyRequest, reply: FastifyReply) => {
     let conn: any = null;
     let mustRelease = false;
 
     try {
-      const parsed = CreateSchema.parse((req as any).body);
+      const parsed = CreateSchema.parse(req.body);
       const data = coerceForDB(pickAllowed(parsed));
 
       if ((db as any).getConnection) {
@@ -229,32 +299,52 @@ export default async function jugadores(app: FastifyInstance) {
 
       // Duplicados previos
       if (data.rut_jugador != null) {
-        const [r]: any = await conn.query('SELECT id FROM jugadores WHERE rut_jugador = ? LIMIT 1', [data.rut_jugador]);
+        const [r]: any = await conn.query(
+          'SELECT id FROM jugadores WHERE rut_jugador = ? LIMIT 1',
+          [data.rut_jugador]
+        );
         if (Array.isArray(r) && r.length > 0) {
-          return reply.code(409).send({ ok: false, field: 'rut_jugador', message: 'Duplicado: el RUT ya existe' });
+          return reply.code(409).send({
+            ok: false,
+            field: 'rut_jugador',
+            message: 'Duplicado: el RUT ya existe'
+          });
         }
       }
+
       if (data.email) {
-        const [r2]: any = await conn.query('SELECT id FROM jugadores WHERE LOWER(email)=LOWER(?) LIMIT 1', [data.email]);
+        const [r2]: any = await conn.query(
+          'SELECT id FROM jugadores WHERE LOWER(email)=LOWER(?) LIMIT 1',
+          [data.email]
+        );
         if (Array.isArray(r2) && r2.length > 0) {
-          return reply.code(409).send({ ok: false, field: 'email', message: 'Duplicado: el email ya existe' });
+          return reply.code(409).send({
+            ok: false,
+            field: 'email',
+            message: 'Duplicado: el email ya existe'
+          });
         }
       }
 
       // FKs (solo si vienen)
-      const fkChecks: Array<{ field: string, sql: string, val: any }> = [
+      const fkChecks: Array<{ field: string; sql: string; val: any }> = [
         { field: 'posicion_id', sql: 'SELECT 1 FROM posiciones WHERE id = ? LIMIT 1', val: data.posicion_id },
         { field: 'categoria_id', sql: 'SELECT 1 FROM categorias WHERE id = ? LIMIT 1', val: data.categoria_id },
         { field: 'estado_id', sql: 'SELECT 1 FROM estado WHERE id = ? LIMIT 1', val: data.estado_id },
-        { field: 'establec_educ_id', sql: 'SELECT 1 FROM establec_educ WHERE id = ? LIMIT 1', val: data.establec_educ_id }, // <- correcto
+        { field: 'establec_educ_id', sql: 'SELECT 1 FROM establec_educ WHERE id = ? LIMIT 1', val: data.establec_educ_id },
         { field: 'prevision_medica_id', sql: 'SELECT 1 FROM prevision_medica WHERE id = ? LIMIT 1', val: data.prevision_medica_id },
         { field: 'sucursal_id', sql: 'SELECT 1 FROM sucursales_real WHERE id = ? LIMIT 1', val: data.sucursal_id },
       ];
+
       for (const fk of fkChecks) {
         if (fk.val != null) {
           const [r]: any = await conn.query(fk.sql, [fk.val]);
           if (!Array.isArray(r) || r.length === 0) {
-            return reply.code(409).send({ ok: false, field: fk.field, message: `Violación de clave foránea: ${fk.field} no existe` });
+            return reply.code(409).send({
+              ok: false,
+              field: fk.field,
+              message: `Violación de clave foránea: ${fk.field} no existe`
+            });
           }
         }
       }
@@ -262,55 +352,87 @@ export default async function jugadores(app: FastifyInstance) {
       await conn.beginTransaction();
 
       // 1) Inserta jugador sin estadistica_id
-      // 1) Inserta jugador sin estadistica_id
       const [resJug]: any = await conn.query('INSERT INTO jugadores SET ?', [data]);
       const jugadorId: number = resJug.insertId;
 
-      // 2) Primero asegura el valor padre en la tabla jugadores
-      await conn.query('UPDATE jugadores SET estadistica_id = ? WHERE id = ?', [jugadorId, jugadorId]);
+      // 2) Asegura el valor padre en jugadores (FK padre)
+      await conn.query(
+        'UPDATE jugadores SET estadistica_id = ? WHERE id = ?',
+        [jugadorId, jugadorId]
+      );
 
-      // 3) Ahora sí, inserta la fila hija en estadisticas que referencia al padre ya existente
+      // 3) Inserta fila hija en estadisticas que referencia al padre existente
       try {
-        await conn.query('INSERT INTO estadisticas (estadistica_id) VALUES (?)', [jugadorId]);
+        await conn.query(
+          'INSERT INTO estadisticas (estadistica_id) VALUES (?)',
+          [jugadorId]
+        );
       } catch (e: any) {
-        if (e?.errno !== 1062) throw e; // idempotencia si ya existía
+        if (e?.errno !== 1062) throw e; // si ya existía, lo ignoramos
       }
-
-
-      // 3) Actualiza el FK único
-      await conn.query('UPDATE jugadores SET estadistica_id = ? WHERE id = ?', [jugadorId, jugadorId]);
 
       await conn.commit();
 
       return reply.code(201).send({
         ok: true,
         id: jugadorId,
-        ...normalizeOut({ id: jugadorId, ...data, estadistica_id: jugadorId }),
+        ...normalizeOut({
+          id: jugadorId,
+          ...data,
+          estadistica_id: jugadorId,
+        }),
       });
 
     } catch (err: any) {
-      if (conn) { try { await conn.rollback(); } catch { } }
+      if (conn) {
+        try { await conn.rollback(); } catch { }
+      }
 
       if (err instanceof ZodError) {
         const detail = err.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ');
-        return reply.code(400).send({ ok: false, message: 'Payload inválido', detail });
+        return reply.code(400).send({
+          ok: false,
+          message: 'Payload inválido',
+          detail
+        });
       }
+
       if (err?.errno === 1062) {
         const msg = String(err?.sqlMessage || '').toLowerCase();
-        const field = msg.includes('rut_jugador') ? 'rut_jugador' : (msg.includes('email') ? 'email' : undefined);
+        const field = msg.includes('rut_jugador')
+          ? 'rut_jugador'
+          : (msg.includes('email') ? 'email' : undefined);
+
         return reply.code(409).send({
           ok: false,
           message: field ? `Duplicado: ${field} ya existe` : 'Duplicado: clave única violada',
-          field, detail: err?.sqlMessage
+          field,
+          detail: err?.sqlMessage
         });
       }
+
       if (err?.errno === 1452) {
-        return reply.code(409).send({ ok: false, message: 'Violación de clave foránea (revisa ids enviados)', detail: err?.sqlMessage ?? err?.message });
+        return reply.code(409).send({
+          ok: false,
+          message: 'Violación de clave foránea (revisa ids enviados)',
+          detail: err?.sqlMessage ?? err?.message
+        });
       }
+
       if (err?.errno === 1054) {
-        return reply.code(500).send({ ok: false, message: 'Columna desconocida: revisa el esquema de tablas', detail: err?.sqlMessage ?? err?.message });
+        return reply.code(500).send({
+          ok: false,
+          message: 'Columna desconocida: revisa el esquema de tablas',
+          detail: err?.sqlMessage ?? err?.message
+        });
       }
-      return reply.code(500).send({ ok: false, message: 'Error al crear jugador', detail: err?.sqlMessage ?? err?.message });
+
+      return reply.code(500).send({
+        ok: false,
+        message: 'Error al crear jugador',
+        detail: err?.sqlMessage ?? err?.message
+      });
+
     } finally {
       if (conn && mustRelease && typeof conn.release === 'function') {
         try { conn.release(); } catch { }
@@ -318,89 +440,172 @@ export default async function jugadores(app: FastifyInstance) {
     }
   });
 
-  // PATCH /jugadores/:id
+  // ───────── PATCH /jugadores/:id ─────────
   app.patch('/:id', async (req: FastifyRequest, reply: FastifyReply) => {
-    const pid = IdParam.safeParse((req as any).params);
-    if (!pid.success) return reply.code(400).send({ ok: false, message: 'ID inválido' });
+    const pid = IdParam.safeParse(req.params);
+    if (!pid.success) {
+      return reply.code(400).send({ ok: false, message: 'ID inválido' });
+    }
     const id = Number(pid.data.id);
 
     try {
-      const parsed = UpdateSchema.parse((req as any).body);
+      const parsed = UpdateSchema.parse(req.body);
       const changes = coerceForDB(pickAllowed(parsed));
       delete (changes as any).estadistica_id;
 
       if (Object.keys(changes).length === 0) {
-        return reply.code(400).send({ ok: false, message: 'No hay campos para actualizar' });
+        return reply.code(400).send({
+          ok: false,
+          message: 'No hay campos para actualizar'
+        });
       }
 
-      const [result]: any = await db.query('UPDATE jugadores SET ? WHERE id = ?', [changes, id]);
-      if (result.affectedRows === 0) return reply.code(404).send({ ok: false, message: 'No encontrado' });
+      const [result]: any = await db.query(
+        'UPDATE jugadores SET ? WHERE id = ?',
+        [changes, id]
+      );
+
+      if (result.affectedRows === 0) {
+        return reply.code(404).send({ ok: false, message: 'No encontrado' });
+      }
 
       reply.send({ ok: true, updated: { id, ...changes } });
+
     } catch (err: any) {
       if (err instanceof ZodError) {
         const detail = err.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ');
-        return reply.code(400).send({ ok: false, message: 'Payload inválido', detail });
+        return reply.code(400).send({
+          ok: false,
+          message: 'Payload inválido',
+          detail
+        });
       }
+
       if (err?.errno === 1062) {
-        return reply.code(409).send({ ok: false, message: 'Duplicado: el RUT (o email) ya existe' });
+        return reply.code(409).send({
+          ok: false,
+          message: 'Duplicado: el RUT (o email) ya existe'
+        });
       }
+
       if (err?.errno === 1452) {
-        return reply.code(409).send({ ok: false, message: 'Violación de clave foránea (sucursal_id inválido)', detail: err?.sqlMessage ?? err?.message });
+        return reply.code(409).send({
+          ok: false,
+          message: 'Violación de clave foránea (sucursal_id inválido)',
+          detail: err?.sqlMessage ?? err?.message
+        });
       }
-      reply.code(500).send({ ok: false, message: 'Error al actualizar jugador', detail: err?.message });
+
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al actualizar jugador',
+        detail: err?.message
+      });
     }
   });
 
-  // PATCH /jugadores/rut/:rut
+  // ───────── PATCH /jugadores/rut/:rut ─────────
   app.patch('/rut/:rut', async (req: FastifyRequest, reply: FastifyReply) => {
-    const pr = RutParam.safeParse((req as any).params);
-    if (!pr.success) return reply.code(400).send({ ok: false, message: pr.error.issues[0]?.message || 'RUT inválido' });
+    const pr = RutParam.safeParse(req.params);
+    if (!pr.success) {
+      return reply.code(400).send({
+        ok: false,
+        message: pr.error.issues[0]?.message || 'RUT inválido'
+      });
+    }
     const rut = pr.data.rut;
 
     try {
-      const parsed = UpdateSchema.parse((req as any).body);
+      const parsed = UpdateSchema.parse(req.body);
       const changes = coerceForDB(pickAllowed(parsed));
       delete (changes as any).estadistica_id;
 
       if (Object.keys(changes).length === 0) {
-        return reply.code(400).send({ ok: false, message: 'No hay campos para actualizar' });
+        return reply.code(400).send({
+          ok: false,
+          message: 'No hay campos para actualizar'
+        });
       }
 
-      const [result]: any = await db.query('UPDATE jugadores SET ? WHERE rut_jugador = ?', [changes, rut]);
-      if (result.affectedRows === 0) return reply.code(404).send({ ok: false, message: 'No encontrado' });
+      const [result]: any = await db.query(
+        'UPDATE jugadores SET ? WHERE rut_jugador = ?',
+        [changes, rut]
+      );
+
+      if (result.affectedRows === 0) {
+        return reply.code(404).send({ ok: false, message: 'No encontrado' });
+      }
 
       reply.send({ ok: true, updated: { rut_jugador: rut, ...changes } });
+
     } catch (err: any) {
       if (err instanceof ZodError) {
         const detail = err.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ');
-        return reply.code(400).send({ ok: false, message: 'Payload inválido', detail });
+        return reply.code(400).send({
+          ok: false,
+          message: 'Payload inválido',
+          detail
+        });
       }
+
       if (err?.errno === 1062) {
-        return reply.code(409).send({ ok: false, message: 'Duplicado: el RUT (o email) ya existe' });
+        return reply.code(409).send({
+          ok: false,
+          message: 'Duplicado: el RUT (o email) ya existe'
+        });
       }
+
       if (err?.errno === 1452) {
-        return reply.code(409).send({ ok: false, message: 'Violación de clave foránea (sucursal_id inválido)', detail: err?.sqlMessage ?? err?.message });
+        return reply.code(409).send({
+          ok: false,
+          message: 'Violación de clave foránea (sucursal_id inválido)',
+          detail: err?.sqlMessage ?? err?.message
+        });
       }
-      reply.code(500).send({ ok: false, message: 'Error al actualizar jugador por RUT', detail: err?.message });
+
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al actualizar jugador por RUT',
+        detail: err?.message
+      });
     }
   });
 
-  // DELETE
+  // ───────── DELETE ─────────
   app.delete('/:id', async (req: FastifyRequest, reply: FastifyReply) => {
-    const pid = IdParam.safeParse((req as any).params);
-    if (!pid.success) return reply.code(400).send({ ok: false, message: 'ID inválido' });
+    const pid = IdParam.safeParse(req.params);
+    if (!pid.success) {
+      return reply.code(400).send({ ok: false, message: 'ID inválido' });
+    }
     const id = Number(pid.data.id);
 
     try {
-      const [result]: any = await db.query('DELETE FROM jugadores WHERE id = ?', [id]);
-      if (result.affectedRows === 0) return reply.code(404).send({ ok: false, message: 'No encontrado' });
+      const [result]: any = await db.query(
+        'DELETE FROM jugadores WHERE id = ?',
+        [id]
+      );
+
+      if (result.affectedRows === 0) {
+        return reply.code(404).send({ ok: false, message: 'No encontrado' });
+      }
+
       reply.send({ ok: true, deleted: id });
+
     } catch (err: any) {
       if (err?.errno === 1451) {
-        return reply.code(409).send({ ok: false, message: 'No se puede eliminar: hay referencias asociadas.', detail: err?.sqlMessage ?? err?.message });
+        return reply.code(409).send({
+          ok: false,
+          message: 'No se puede eliminar: hay referencias asociadas.',
+          detail: err?.sqlMessage ?? err?.message
+        });
       }
-      reply.code(500).send({ ok: false, message: 'Error al eliminar jugador', detail: err?.message });
+
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al eliminar jugador',
+        detail: err?.message
+      });
     }
   });
+
 }

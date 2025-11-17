@@ -1,49 +1,58 @@
 // src/index.ts
-import jwt from 'jsonwebtoken';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
+import jwt from 'jsonwebtoken';
 import swagger from '@fastify/swagger';
 import swaggerUI from '@fastify/swagger-ui';
 
 import { CONFIG } from './config';
+import { initDb, getDb } from './db';
 import { registerRoutes } from './routes';
-import { initDb, pool } from './db';
+import { registerSchemas } from './schemas/schemas'; // ⬅️ AQUÍ EL CAMBIO
 
+/* ───────────────────────────────────────────────
+ * Crear instancia Fastify
+ * ─────────────────────────────────────────────── */
 const app = Fastify({
   logger: CONFIG.NODE_ENV === 'production'
-    ? { level: 'warn' }  // solo warnings/errores en prod
-    : { level: 'info' }, // más detalle en dev
+    ? { level: 'warn' }
+    : { level: 'info' },
 });
 
-
+/* ───────────────────────────────────────────────
+ * Bootstrap principal
+ * ─────────────────────────────────────────────── */
 async function bootstrap() {
+
   /* ───────── Middlewares base ───────── */
   await app.register(cors, {
-    origin: true, // refleja Origin
+    origin: true,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
     allowedHeaders: ['Content-Type', 'Authorization'],
   });
 
   await app.register(helmet, {
-    contentSecurityPolicy: false, // evita bloquear assets del /docs
+    contentSecurityPolicy: false,
     crossOriginResourcePolicy: { policy: 'cross-origin' },
   });
 
-  /* ───────── Rutas públicas fijas (con Content-Type estable) ───────── */
+  /* ───────── Home / Health ───────── */
   const HTML_CT = 'text/html; charset=UTF-8';
   const JSON_CT = 'application/json; charset=UTF-8';
 
-  const homeHtml = () => (
-    `<!doctype html><html><head><meta charset="utf-8"><title>RAFC API</title></head>
-     <body>
-       <h1>Real Academy FC Reload — API</h1>
-       <p>Status: online</p>
-       <p>Environment: ${CONFIG.NODE_ENV}</p>
-       <p>Timestamp: ${new Date().toISOString()}</p>
-     </body></html>`
-  );
+  const homeHtml = () => `
+    <!doctype html>
+    <html>
+      <head><meta charset="utf-8"><title>RAFC API</title></head>
+      <body>
+        <h1>Real Academy FC Reload — API</h1>
+        <p>Status: online</p>
+        <p>Environment: ${CONFIG.NODE_ENV}</p>
+        <p>Timestamp: ${new Date().toISOString()}</p>
+      </body>
+    </html>`;
 
   const healthJson = (req: any) => ({
     ok: true,
@@ -52,36 +61,36 @@ async function bootstrap() {
     time: new Date().toISOString(),
   });
 
-  // Raíz y alias /api con HTML + charset fijo (para panel de hosting)
-  app.get('/', { config: { public: true } }, async (_req, reply) =>
-    reply.header('Content-Type', HTML_CT).send(homeHtml())
-  );
-  app.get('/api', { config: { public: true } }, async (_req, reply) =>
+  app.get('/', async (_req, reply) =>
     reply.header('Content-Type', HTML_CT).send(homeHtml())
   );
 
-  // Health JSON + charset fijo
-  app.get('/health', { config: { public: true } }, async (req, reply) =>
-    reply.header('Content-Type', JSON_CT).send(healthJson(req))
+  app.get('/api', async (_req, reply) =>
+    reply.header('Content-Type', HTML_CT).send(homeHtml())
   );
-  app.get('/api/health', { config: { public: true } }, async (req, reply) =>
+
+  app.get('/health', async (req, reply) =>
     reply.header('Content-Type', JSON_CT).send(healthJson(req))
   );
 
-  // Extras típicos
-  app.get('/favicon.ico', { config: { public: true } }, async (_req, reply) => reply.code(204).send());
-  app.get('/robots.txt', { config: { public: true } }, async (_req, reply) =>
-    reply.header('Content-Type', 'text/plain; charset=UTF-8').send('User-agent: *\nDisallow:\n')
+  app.get('/api/health', async (req, reply) =>
+    reply.header('Content-Type', JSON_CT).send(healthJson(req))
   );
 
-  /* ───────── Swagger / OpenAPI ───────── */
-  /* ───────── Swagger / OpenAPI ───────── */
+  /* ───────── Favicon / robots ───────── */
+  app.get('/favicon.ico', async (_req, reply) => reply.code(204).send());
+  app.get('/robots.txt', async (_req, reply) =>
+    reply.header('Content-Type', 'text/plain; charset=UTF-8')
+      .send('User-agent: *\nDisallow:\n')
+  );
+
+  /* ───────── Swagger (solo en dev) ───────── */
   if (CONFIG.NODE_ENV !== 'production') {
     await app.register(swagger, {
       openapi: {
         info: {
           title: 'RAFC Reload API',
-          description: 'Backend Node/Fastify — RAFC',
+          description: 'Backend Node/Fastify — Real Academy FC Reload',
           version: '1.0.0',
         },
         servers: [
@@ -103,12 +112,13 @@ async function bootstrap() {
     });
   }
 
-
-
-  /* ───────── DB ───────── */
+  /* ───────── Inicializar BD ───────── */
   await initDb();
 
-  /* ───────── Guard global JWT ───────── */
+  /* ───────── Registrar Schemas globales ───────── */
+  await registerSchemas(app);
+
+  /* ───────── Autenticación global JWT ───────── */
   const PUBLIC = [
     /^\/$/i,
     /^\/api$/i,
@@ -123,20 +133,19 @@ async function bootstrap() {
   ];
 
   app.addHook('onRequest', async (req, reply) => {
-    // Permite preflight y HEAD
     if (req.method === 'OPTIONS' || req.method === 'HEAD') return;
 
-    // Rutas públicas
-    if (PUBLIC.some(rx => rx.test(req.url))) return;
+    if (PUBLIC.some((rx) => rx.test(req.url))) return;
 
-    // JWT requerido
-    const h = req.headers.authorization;
-    if (!h?.startsWith('Bearer ')) {
+    const auth = req.headers.authorization;
+    if (!auth?.startsWith('Bearer ')) {
       return reply.code(401).send({ ok: false, message: 'Falta Bearer token' });
     }
+
     try {
-      const token = h.slice(7);
+      const token = auth.slice(7);
       const payload: any = jwt.verify(token, CONFIG.JWT_SECRET);
+
       (req as any).user = {
         id: payload.sub,
         rol_id: payload.rol_id,
@@ -147,35 +156,43 @@ async function bootstrap() {
     }
   });
 
-  /* ───────── Rutas de negocio ───────── */
+  /* ───────── Registrar rutas de negocio ───────── */
   await registerRoutes(app);
 
   /* ───────── Shutdown limpio ───────── */
   const close = async () => {
     app.log.info('Shutting down gracefully...');
+
     try {
       await app.close();
-      if (pool) await pool.end();
-      app.log.info('MySQL pool closed');
+
+      try {
+        const pool = getDb();
+        await pool.end();
+        app.log.info('MySQL pool closed');
+      } catch (e) {
+        app.log.error(e, 'Pool close error');
+      }
+
       process.exit(0);
     } catch (err) {
       app.log.error({ err }, 'Error during shutdown');
       process.exit(1);
     }
   };
+
   process.on('SIGINT', close);
   process.on('SIGTERM', close);
 
-  /* ───────── Arranque (puerto dinámico) ─────────
-     Importante en Passenger/hosting: NO fijar 8000 si el
-     proceso principal del servidor ya lo usa. */
-  const PORT = Number(process.env.PORT) || 0; // 0 => sistema elige
+  /* ───────── Levantar servidor ───────── */
+  const PORT = Number(process.env.PORT) || CONFIG.PORT || 8000;
   const HOST = '0.0.0.0';
 
   await app.listen({ port: PORT, host: HOST });
-  app.log.info(`🟢 Server ready (env=${CONFIG.NODE_ENV})`);
+  app.log.info(`🟢 Server ready (env=${CONFIG.NODE_ENV}) — listening on ${HOST}:${PORT}`);
 }
 
+/* ───────── Ejecutar bootstrap ───────── */
 bootstrap().catch((err) => {
   app.log.error(err, '❌ Fatal error on bootstrap');
   process.exit(1);
