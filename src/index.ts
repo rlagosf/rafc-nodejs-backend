@@ -9,22 +9,22 @@ import swaggerUI from '@fastify/swagger-ui';
 import { CONFIG } from './config';
 import { initDb, getDb } from './db';
 import { registerRoutes } from './routes';
-import { registerSchemas } from './schemas/schemas'; // ⬅️ AQUÍ EL CAMBIO
+import { registerSchemas } from './schemas/schemas';
 
 /* ───────────────────────────────────────────────
  * Crear instancia Fastify
  * ─────────────────────────────────────────────── */
 const app = Fastify({
-  logger: CONFIG.NODE_ENV === 'production'
-    ? { level: 'warn' }
-    : { level: 'info' },
+  logger:
+    CONFIG.NODE_ENV === 'production'
+      ? { level: 'warn' }
+      : { level: 'info' },
 });
 
 /* ───────────────────────────────────────────────
  * Bootstrap principal
  * ─────────────────────────────────────────────── */
 async function bootstrap() {
-
   /* ───────── Middlewares base ───────── */
   await app.register(cors, {
     origin: true,
@@ -62,26 +62,27 @@ async function bootstrap() {
   });
 
   app.get('/', async (_req, reply) =>
-    reply.header('Content-Type', HTML_CT).send(homeHtml())
+    reply.header('Content-Type', HTML_CT).send(homeHtml()),
   );
 
   app.get('/api', async (_req, reply) =>
-    reply.header('Content-Type', HTML_CT).send(homeHtml())
+    reply.header('Content-Type', HTML_CT).send(homeHtml()),
   );
 
   app.get('/health', async (req, reply) =>
-    reply.header('Content-Type', JSON_CT).send(healthJson(req))
+    reply.header('Content-Type', JSON_CT).send(healthJson(req)),
   );
 
   app.get('/api/health', async (req, reply) =>
-    reply.header('Content-Type', JSON_CT).send(healthJson(req))
+    reply.header('Content-Type', JSON_CT).send(healthJson(req)),
   );
 
   /* ───────── Favicon / robots ───────── */
   app.get('/favicon.ico', async (_req, reply) => reply.code(204).send());
   app.get('/robots.txt', async (_req, reply) =>
-    reply.header('Content-Type', 'text/plain; charset=UTF-8')
-      .send('User-agent: *\nDisallow:\n')
+    reply
+      .header('Content-Type', 'text/plain; charset=UTF-8')
+      .send('User-agent: *\nDisallow:\n'),
   );
 
   /* ───────── Swagger (solo en dev) ───────── */
@@ -94,12 +95,19 @@ async function bootstrap() {
           version: '1.0.0',
         },
         servers: [
-          { url: `http://127.0.0.1:${CONFIG.PORT || 8000}`, description: 'Local' },
+          {
+            url: `http://127.0.0.1:${CONFIG.PORT || 8000}`,
+            description: 'Local',
+          },
           { url: 'https://realacademyfc.cl/api', description: 'Producción' },
         ],
         components: {
           securitySchemes: {
-            bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+            bearerAuth: {
+              type: 'http',
+              scheme: 'bearer',
+              bearerFormat: 'JWT',
+            },
           },
         },
         security: [{ bearerAuth: [] }],
@@ -119,17 +127,23 @@ async function bootstrap() {
   await registerSchemas(app);
 
   /* ───────── Autenticación global JWT ───────── */
-  /* ───────── Autenticación global JWT ───────── */
 
   const PUBLIC = [
+    // Raíz / API root
     /^\/$/i,
     /^\/api\/?$/i,
+
+    // Health (con o sin /api)
     /^\/health(?:\/.*)?$/i,
     /^\/api\/health(?:\/.*)?$/i,
 
-    // LOGIN / LOGOUT: permitir opcionalmente querystring o slash
+    // LOGIN: permitir /auth/login y /api/auth/login (con o sin query / slash)
     /^\/auth\/login(?:\/.*)?$/i,
+    /^\/api\/auth\/login(?:\/.*)?$/i,
+
+    // LOGOUT (si quieres dejarlo sin token; si no, puedes quitar estas dos)
     /^\/auth\/logout(?:\/.*)?$/i,
+    /^\/api\/auth\/logout(?:\/.*)?$/i,
 
     // Swagger / Docs
     /^\/docs(?:\/.*)?$/i,
@@ -143,15 +157,17 @@ async function bootstrap() {
   app.addHook('onRequest', async (req, reply) => {
     if (req.method === 'OPTIONS' || req.method === 'HEAD') return;
 
-    // 💡 Limpiamos query string: de "/auth/login?t=123" pasamos a "/auth/login"
+    // Normalizamos: "/api/auth/login?t=123" → "/api/auth/login"
     const path = req.url.split('?')[0];
 
-    // Rutas públicas -> no exigimos Bearer
+    // Rutas públicas → NO exigimos Bearer
     if (PUBLIC.some((rx) => rx.test(path))) return;
 
     const auth = req.headers.authorization;
     if (!auth?.startsWith('Bearer ')) {
-      return reply.code(401).send({ ok: false, message: 'Falta Bearer token' });
+      return reply
+        .code(401)
+        .send({ ok: false, message: 'Falta Bearer token' });
     }
 
     try {
@@ -164,7 +180,9 @@ async function bootstrap() {
         nombre_usuario: payload.nombre_usuario,
       };
     } catch {
-      return reply.code(401).send({ ok: false, message: 'Token inválido o expirado' });
+      return reply
+        .code(401)
+        .send({ ok: false, message: 'Token inválido o expirado' });
     }
   });
 
@@ -201,7 +219,9 @@ async function bootstrap() {
   const HOST = '0.0.0.0';
 
   await app.listen({ port: PORT, host: HOST });
-  app.log.info(`🟢 Server ready (env=${CONFIG.NODE_ENV}) — listening on ${HOST}:${PORT}`);
+  app.log.info(
+    `🟢 Server ready (env=${CONFIG.NODE_ENV}) — listening on ${HOST}:${PORT}`,
+  );
 }
 
 /* ───────── Ejecutar bootstrap ───────── */
