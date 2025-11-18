@@ -119,15 +119,23 @@ async function bootstrap() {
   await registerSchemas(app);
 
   /* ───────── Autenticación global JWT ───────── */
+  /* ───────── Autenticación global JWT ───────── */
+
   const PUBLIC = [
     /^\/$/i,
-    /^\/api$/i,
+    /^\/api\/?$/i,
     /^\/health(?:\/.*)?$/i,
     /^\/api\/health(?:\/.*)?$/i,
-    /^\/auth\/login$/i,
-    /^\/auth\/logout$/i,
+
+    // LOGIN / LOGOUT: permitir opcionalmente querystring o slash
+    /^\/auth\/login(?:\/.*)?$/i,
+    /^\/auth\/logout(?:\/.*)?$/i,
+
+    // Swagger / Docs
     /^\/docs(?:\/.*)?$/i,
     /^\/swagger(?:\/.*)?$/i,
+
+    // Estáticos básicos
     /^\/favicon\.ico$/i,
     /^\/robots\.txt$/i,
   ];
@@ -135,7 +143,11 @@ async function bootstrap() {
   app.addHook('onRequest', async (req, reply) => {
     if (req.method === 'OPTIONS' || req.method === 'HEAD') return;
 
-    if (PUBLIC.some((rx) => rx.test(req.url))) return;
+    // 💡 Limpiamos query string: de "/auth/login?t=123" pasamos a "/auth/login"
+    const path = req.url.split('?')[0];
+
+    // Rutas públicas -> no exigimos Bearer
+    if (PUBLIC.some((rx) => rx.test(path))) return;
 
     const auth = req.headers.authorization;
     if (!auth?.startsWith('Bearer ')) {
@@ -143,7 +155,7 @@ async function bootstrap() {
     }
 
     try {
-      const token = auth.slice(7);
+      const token = auth.substring(7);
       const payload: any = jwt.verify(token, CONFIG.JWT_SECRET);
 
       (req as any).user = {
