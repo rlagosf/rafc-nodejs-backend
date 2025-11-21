@@ -1,4 +1,4 @@
-import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { db } from '../db';
 
@@ -71,6 +71,14 @@ const PageQuery = z.object({
   offset: z.coerce.number().int().nonnegative().default(0),
 });
 
+// 🔎 Nuevo: filtros opcionales para listar
+const ListQuery = PageQuery.extend({
+  year: z.coerce.number().int().optional(),
+  month: z.coerce.number().int().min(1).max(12).optional(),
+  tipo_pago_id: z.coerce.number().int().positive().optional(),
+  jugador_rut: z.coerce.number().int().positive().optional(),
+});
+
 /* ────────────────────────────────────────────────────────────── */
 /* Endpoint optimizado                                           */
 /* ────────────────────────────────────────────────────────────── */
@@ -83,29 +91,66 @@ export default async function pagos_jugador(app: FastifyInstance) {
     timestamp: new Date().toISOString(),
   }));
 
-  /* ───────── GET paginado ───────── */
+  /* ───────── GET listado con filtros + paginación ───────── */
   app.get('/', async (req, reply) => {
-    const { limit, offset } = PageQuery.parse((req as any).query);
+    const queryParsed = ListQuery.parse((req as any).query);
+    const { limit, offset, year, month, tipo_pago_id, jugador_rut } = queryParsed;
 
     try {
-      const [rows] = await db.query(
-        `SELECT *
-           FROM pagos_jugador
-          ORDER BY fecha_pago DESC, id DESC
-          LIMIT ? OFFSET ?`,
-        [limit, offset]
-      );
+      let sql = `
+        SELECT *
+          FROM pagos_jugador
+         WHERE 1 = 1
+      `;
+      const params: any[] = [];
 
-      reply.send({ ok: true, items: rows, limit, offset });
+      if (jugador_rut) {
+        sql += ' AND jugador_rut = ?';
+        params.push(jugador_rut);
+      }
+
+      if (tipo_pago_id) {
+        sql += ' AND tipo_pago_id = ?';
+        params.push(tipo_pago_id);
+      }
+
+      if (year) {
+        sql += ' AND YEAR(fecha_pago) = ?';
+        params.push(year);
+      }
+
+      if (month) {
+        sql += ' AND MONTH(fecha_pago) = ?';
+        params.push(month);
+      }
+
+      sql += `
+         ORDER BY fecha_pago DESC, id DESC
+         LIMIT ? OFFSET ?
+      `;
+      params.push(limit, offset);
+
+      const [rows] = await db.query(sql, params);
+
+      reply.send({
+        ok: true,
+        items: rows,
+        limit,
+        offset,
+        filters: { year, month, tipo_pago_id, jugador_rut },
+      });
     } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al listar pagos', error: err?.message });
+      reply
+        .code(500)
+        .send({ ok: false, message: 'Error al listar pagos', error: err?.message });
     }
   });
 
   /* ───────── GET por ID ───────── */
   app.get('/:id', async (req, reply) => {
     const parsed = IdParam.safeParse((req as any).params);
-    if (!parsed.success) return reply.code(400).send({ ok: false, message: 'ID inválido' });
+    if (!parsed.success)
+      return reply.code(400).send({ ok: false, message: 'ID inválido' });
 
     try {
       const [rows]: any = await db.query(
@@ -118,14 +163,17 @@ export default async function pagos_jugador(app: FastifyInstance) {
 
       reply.send({ ok: true, item: rows[0] });
     } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al obtener pago', error: err?.message });
+      reply
+        .code(500)
+        .send({ ok: false, message: 'Error al obtener pago', error: err?.message });
     }
   });
 
   /* ───────── GET por jugador_rut ───────── */
   app.get('/jugador/:jugador_rut', async (req, reply) => {
     const parsed = RutParam.safeParse((req as any).params);
-    if (!parsed.success) return reply.code(400).send({ ok: false, message: 'RUT inválido' });
+    if (!parsed.success)
+      return reply.code(400).send({ ok: false, message: 'RUT inválido' });
 
     try {
       const [rows] = await db.query(
@@ -169,14 +217,17 @@ export default async function pagos_jugador(app: FastifyInstance) {
       const [result]: any = await db.query('INSERT INTO pagos_jugador SET ?', [data]);
       reply.code(201).send({ ok: true, id: result.insertId, ...data });
     } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al crear pago', error: err?.message });
+      reply
+        .code(500)
+        .send({ ok: false, message: 'Error al crear pago', error: err?.message });
     }
   });
 
   /* ───────── PUT actualizar ───────── */
   app.put('/:id', async (req, reply) => {
     const pid = IdParam.safeParse((req as any).params);
-    if (!pid.success) return reply.code(400).send({ ok: false, message: 'ID inválido' });
+    if (!pid.success)
+      return reply.code(400).send({ ok: false, message: 'ID inválido' });
     const id = pid.data.id;
 
     const raw = (req as any).body ?? {};
@@ -195,12 +246,15 @@ export default async function pagos_jugador(app: FastifyInstance) {
 
     if (data.fecha_pago) {
       const sqlDate = toSQLDate(data.fecha_pago);
-      if (!sqlDate) return reply.code(400).send({ ok: false, message: 'fecha_pago inválida' });
+      if (!sqlDate)
+        return reply.code(400).send({ ok: false, message: 'fecha_pago inválida' });
       data.fecha_pago = sqlDate;
     }
 
     if (Object.keys(data).length === 0)
-      return reply.code(400).send({ ok: false, message: 'No hay campos para actualizar' });
+      return reply
+        .code(400)
+        .send({ ok: false, message: 'No hay campos para actualizar' });
 
     try {
       const [result]: any = await db.query('UPDATE pagos_jugador SET ? WHERE id = ?', [
@@ -213,14 +267,19 @@ export default async function pagos_jugador(app: FastifyInstance) {
 
       reply.send({ ok: true, updated: { id, ...data } });
     } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al actualizar pago', error: err?.message });
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al actualizar pago',
+        error: err?.message,
+      });
     }
   });
 
   /* ───────── DELETE eliminar ───────── */
   app.delete('/:id', async (req, reply) => {
     const parsed = IdParam.safeParse((req as any).params);
-    if (!parsed.success) return reply.code(400).send({ ok: false, message: 'ID inválido' });
+    if (!parsed.success)
+      return reply.code(400).send({ ok: false, message: 'ID inválido' });
 
     try {
       const [result]: any = await db.query('DELETE FROM pagos_jugador WHERE id = ?', [
@@ -232,7 +291,11 @@ export default async function pagos_jugador(app: FastifyInstance) {
 
       reply.send({ ok: true, deleted: parsed.data.id });
     } catch (err: any) {
-      reply.code(500).send({ ok: false, message: 'Error al eliminar pago', error: err?.message });
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al eliminar pago',
+        error: err?.message,
+      });
     }
   });
 }
