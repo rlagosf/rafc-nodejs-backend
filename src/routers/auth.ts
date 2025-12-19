@@ -73,7 +73,7 @@ export default async function auth(app: FastifyInstance) {
       // Validación
       const parsed = LoginSchema.safeParse((req as any).body);
       if (!parsed.success) {
-        await audit('access_denied', req, 400, null, { reason: 'invalid_payload' });
+        audit('access_denied', req, 400, null, { reason: 'invalid_payload' });
         return reply.code(400).send({ ok: false, message: 'Payload inválido' });
       }
 
@@ -91,7 +91,7 @@ export default async function auth(app: FastifyInstance) {
         );
 
         if (!rows.length) {
-          await audit('access_denied', req, 401, null, {
+          audit('access_denied', req, 401, null, {
             reason: 'user_not_found',
             nombre_usuario,
           });
@@ -103,7 +103,7 @@ export default async function auth(app: FastifyInstance) {
         // Verificación Argon2
         const ok = await argon2Verify(user.password, password);
         if (!ok) {
-          await audit('access_denied', req, 401, user.id, {
+          audit('access_denied', req, 401, user.id, {
             reason: 'bad_password',
           });
           return reply.code(401).send({ ok: false, message: 'Credenciales inválidas' });
@@ -124,7 +124,7 @@ export default async function auth(app: FastifyInstance) {
 
         const rafc_token = jwt.sign(payload, CONFIG.JWT_SECRET, signOpts);
 
-        await audit('login', req, 200, user.id);
+        audit('login', req, 200, user.id);
 
         return reply.send({
           ok: true,
@@ -140,7 +140,7 @@ export default async function auth(app: FastifyInstance) {
         });
       } catch (err: any) {
         req.log.error({ err }, 'auth/login failed');
-        await audit('access_denied', req, 400, null, {
+        audit('access_denied', req, 400, null, {
           reason: 'exception',
           message: err?.message,
         });
@@ -156,7 +156,7 @@ export default async function auth(app: FastifyInstance) {
   app.post('/logout', async (req: FastifyRequest, reply: FastifyReply) => {
     try {
       const userId = (req as any).user?.id ?? null;
-      await audit('logout', req, 200, userId);
+      audit('logout', req, 200, userId);
       return reply.send({ ok: true, message: 'logout' });
     } catch (err: any) {
       req.log.error({ err }, 'auth/logout failed');

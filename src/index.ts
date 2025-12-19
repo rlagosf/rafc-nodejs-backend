@@ -34,9 +34,42 @@ async function bootstrap() {
   });
 
   await app.register(helmet, {
-    contentSecurityPolicy: false,
-    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        "default-src": ["'none'"],
+        "base-uri": ["'none'"],
+        "form-action": ["'none'"],
+        "frame-ancestors": ["'none'"],
+        "img-src": ["'self'", "data:"],
+        "connect-src": ["'self'"],
+      },
+    },
+    frameguard: { action: "deny" },
+    hsts: CONFIG.NODE_ENV === "production"
+      ? { maxAge: 15552000, includeSubDomains: true, preload: false }
+      : false,
+    noSniff: true,
+    referrerPolicy: { policy: "no-referrer" },
+    crossOriginResourcePolicy: { policy: "same-origin" },
+    crossOriginOpenerPolicy: { policy: "same-origin" },
   });
+
+  app.addHook("onSend", async (_req, reply, payload) => {
+    // Permissions-Policy: bloquea features no usadas
+    // (ajusta fullscreen si lo necesitas; el resto lo dejamos cerrado)
+    reply.header(
+      "Permissions-Policy",
+      "geolocation=(), camera=(), microphone=(), payment=(), usb=(), fullscreen=(self)"
+    );
+
+    // Extras útiles en auditoría
+    reply.header("X-DNS-Prefetch-Control", "off");
+    reply.header("X-Permitted-Cross-Domain-Policies", "none");
+
+    return payload;
+  });
+
 
   /* ───────── Home / Health ───────── */
   const HTML_CT = 'text/html; charset=UTF-8';
