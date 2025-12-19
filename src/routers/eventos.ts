@@ -1,6 +1,6 @@
-import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
-import { db } from '../db';
+import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { z } from "zod";
+import { db } from "../db";
 
 /**
  * Tabla: eventos
@@ -11,13 +11,12 @@ import { db } from '../db';
  */
 
 const IdParam = z.object({
-  id: z.string().regex(/^\d+$/)
+  id: z.string().regex(/^\d+$/),
 });
 
 const CreateSchema = z.object({
   titulo: z.string().min(1).max(200),
   descripcion: z.string().max(2000).optional().nullable(),
-  // Acepta ISO o 'YYYY-MM-DD HH:MM:SS'
   fecha_inicio: z.string().min(10),
   fecha_fin: z.string().min(10),
 });
@@ -37,14 +36,12 @@ const PageQuery = z.object({
 // Normaliza fecha de ISO o 'YYYY-MM-DD HH:MM:SS' a 'YYYY-MM-DD HH:MM:SS'
 function toSQLDateTime(input: string): string | null {
   if (!input) return null;
-
-  // Ya viene OK
   if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(input)) return input;
 
   const d = new Date(input);
   if (Number.isNaN(d.valueOf())) return null;
 
-  const pad = (n: number) => String(n).padStart(2, '0');
+  const pad = (n: number) => String(n).padStart(2, "0");
   const yyyy = d.getFullYear();
   const mm = pad(d.getMonth() + 1);
   const dd = pad(d.getDate());
@@ -54,19 +51,29 @@ function toSQLDateTime(input: string): string | null {
   return `${yyyy}-${mm}-${dd} ${HH}:${MM}:${SS}`;
 }
 
-export default async function eventos(app: FastifyInstance) {
+// Helper para respuestas de error consistentes
+function sendDbError(reply: FastifyReply, message: string, err: any) {
+  return reply.code(500).send({
+    ok: false,
+    message,
+    error: err?.message,
+  });
+}
 
+export default async function eventos(app: FastifyInstance) {
   // Health
-  app.get('/health', async () => ({
-    module: 'eventos',
-    status: 'ready',
+  app.get("/health", async () => ({
+    module: "eventos",
+    status: "ready",
     timestamp: new Date().toISOString(),
   }));
 
   // GET /eventos (con paginación opcional)
-  app.get('/', async (req: FastifyRequest, reply: FastifyReply) => {
+  app.get("/", async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = PageQuery.safeParse(req.query);
-    const { limit, offset } = parsed.success ? parsed.data : { limit: 50, offset: 0 };
+    const { limit, offset } = parsed.success
+      ? parsed.data
+      : { limit: 50, offset: 0 };
 
     try {
       const [rows]: any = await db.query(
@@ -74,24 +81,21 @@ export default async function eventos(app: FastifyInstance) {
            FROM eventos
           ORDER BY fecha_inicio DESC, id DESC
           LIMIT ? OFFSET ?`,
-        [limit, offset]
+        [Number(limit), Number(offset)]
       );
 
-      reply.send({ ok: true, items: rows, limit, offset });
+      return reply.send({ ok: true, items: rows, limit, offset });
     } catch (err: any) {
-      reply.code(500).send({
-        ok: false,
-        message: 'Error al listar eventos',
-        error: err?.message
-      });
+      req.log.error({ err }, "GET /eventos failed");
+      return sendDbError(reply, "Error al listar eventos", err);
     }
   });
 
   // GET /eventos/:id
-  app.get('/:id', async (req: FastifyRequest, reply: FastifyReply) => {
+  app.get("/:id", async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = IdParam.safeParse(req.params);
     if (!parsed.success) {
-      return reply.code(400).send({ ok: false, message: 'ID inválido' });
+      return reply.code(400).send({ ok: false, message: "ID inválido" });
     }
 
     const id = Number(parsed.data.id);
@@ -105,27 +109,24 @@ export default async function eventos(app: FastifyInstance) {
       );
 
       if (!rows.length) {
-        return reply.code(404).send({ ok: false, message: 'No encontrado' });
+        return reply.code(404).send({ ok: false, message: "No encontrado" });
       }
 
-      reply.send({ ok: true, item: rows[0] });
+      return reply.send({ ok: true, item: rows[0] });
     } catch (err: any) {
-      reply.code(500).send({
-        ok: false,
-        message: 'Error al obtener evento',
-        error: err?.message
-      });
+      req.log.error({ err, id }, "GET /eventos/:id failed");
+      return sendDbError(reply, "Error al obtener evento", err);
     }
   });
 
   // POST /eventos
-  app.post('/', async (req: FastifyRequest, reply: FastifyReply) => {
+  app.post("/", async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = CreateSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({
         ok: false,
-        message: 'Payload inválido',
-        errors: parsed.error.flatten()
+        message: "Payload inválido",
+        errors: parsed.error.flatten(),
       });
     }
 
@@ -137,14 +138,14 @@ export default async function eventos(app: FastifyInstance) {
     if (!ini || !fin) {
       return reply.code(400).send({
         ok: false,
-        message: 'Formato de fecha inválido'
+        message: "Formato de fecha inválido",
       });
     }
 
     if (new Date(ini) >= new Date(fin)) {
       return reply.code(400).send({
         ok: false,
-        message: 'fecha_fin debe ser mayor que fecha_inicio'
+        message: "fecha_fin debe ser mayor que fecha_inicio",
       });
     }
 
@@ -164,21 +165,18 @@ export default async function eventos(app: FastifyInstance) {
         [id]
       );
 
-      reply.code(201).send({ ok: true, item: rows[0] });
+      return reply.code(201).send({ ok: true, item: rows[0] });
     } catch (err: any) {
-      reply.code(500).send({
-        ok: false,
-        message: 'Error al crear evento',
-        error: err?.message
-      });
+      req.log.error({ err }, "POST /eventos failed");
+      return sendDbError(reply, "Error al crear evento", err);
     }
   });
 
-  // PUT /eventos/:id
-  app.put('/:id', async (req: FastifyRequest, reply: FastifyReply) => {
+  // PUT /eventos/:id (SOLIDO: sin SET ?)
+  app.put("/:id", async (req: FastifyRequest, reply: FastifyReply) => {
     const pid = IdParam.safeParse(req.params);
     if (!pid.success) {
-      return reply.code(400).send({ ok: false, message: 'ID inválido' });
+      return reply.code(400).send({ ok: false, message: "ID inválido" });
     }
     const id = Number(pid.data.id);
 
@@ -186,56 +184,68 @@ export default async function eventos(app: FastifyInstance) {
     if (!parsed.success) {
       return reply.code(400).send({
         ok: false,
-        message: 'Payload inválido',
-        errors: parsed.error.flatten()
+        message: "Payload inválido",
+        errors: parsed.error.flatten(),
       });
     }
 
-    const changes: Record<string, any> = {};
+    const fields: string[] = [];
+    const values: any[] = [];
 
     if (parsed.data.titulo !== undefined) {
-      changes.titulo = parsed.data.titulo;
+      fields.push("titulo = ?");
+      values.push(parsed.data.titulo);
     }
+
     if (parsed.data.descripcion !== undefined) {
-      changes.descripcion = parsed.data.descripcion ?? null;
+      fields.push("descripcion = ?");
+      values.push(parsed.data.descripcion ?? null);
     }
+
+    let iniTmp: string | null = null;
+    let finTmp: string | null = null;
+
     if (parsed.data.fecha_inicio !== undefined) {
       const ini = toSQLDateTime(parsed.data.fecha_inicio);
-      if (!ini) {
-        return reply.code(400).send({ ok: false, message: 'fecha_inicio inválida' });
-      }
-      changes.fecha_inicio = ini;
+      if (!ini) return reply.code(400).send({ ok: false, message: "fecha_inicio inválida" });
+      iniTmp = ini;
+      fields.push("fecha_inicio = ?");
+      values.push(ini);
     }
+
     if (parsed.data.fecha_fin !== undefined) {
       const fin = toSQLDateTime(parsed.data.fecha_fin);
-      if (!fin) {
-        return reply.code(400).send({ ok: false, message: 'fecha_fin inválida' });
-      }
-      changes.fecha_fin = fin;
+      if (!fin) return reply.code(400).send({ ok: false, message: "fecha_fin inválida" });
+      finTmp = fin;
+      fields.push("fecha_fin = ?");
+      values.push(fin);
     }
 
-    // Si ambas fechas vienen en el payload, validamos rango
-    if (changes.fecha_inicio && changes.fecha_fin) {
-      if (new Date(changes.fecha_inicio) >= new Date(changes.fecha_fin)) {
-        return reply.code(400).send({
-          ok: false,
-          message: 'fecha_fin debe ser mayor que fecha_inicio'
-        });
-      }
-    }
-
-    if (Object.keys(changes).length === 0) {
+    // Si ambas vienen en el payload, validamos rango
+    if (iniTmp && finTmp && new Date(iniTmp) >= new Date(finTmp)) {
       return reply.code(400).send({
         ok: false,
-        message: 'No hay campos para actualizar'
+        message: "fecha_fin debe ser mayor que fecha_inicio",
+      });
+    }
+
+    if (fields.length === 0) {
+      return reply.code(400).send({
+        ok: false,
+        message: "No hay campos para actualizar",
       });
     }
 
     try {
-      await db.query(
-        'UPDATE eventos SET ?, actualizado_en = NOW() WHERE id = ?',
-        [changes, id]
-      );
+      // añade updated_at
+      const sql = `UPDATE eventos SET ${fields.join(", ")}, actualizado_en = NOW() WHERE id = ?`;
+      values.push(id);
+
+      const [result]: any = await db.query(sql, values);
+
+      if (!result?.affectedRows) {
+        return reply.code(404).send({ ok: false, message: "No encontrado" });
+      }
 
       const [rows]: any = await db.query(
         `SELECT id, titulo, descripcion, fecha_inicio, fecha_fin, creado_en, actualizado_en
@@ -244,46 +254,43 @@ export default async function eventos(app: FastifyInstance) {
         [id]
       );
 
-      if (!rows.length) {
-        return reply.code(404).send({ ok: false, message: 'No encontrado' });
-      }
-
-      reply.send({ ok: true, item: rows[0] });
+      return reply.send({ ok: true, item: rows[0] });
     } catch (err: any) {
-      reply.code(500).send({
-        ok: false,
-        message: 'Error al actualizar evento',
-        error: err?.message
-      });
+      req.log.error({ err, id }, "PUT /eventos/:id failed");
+      return sendDbError(reply, "Error al actualizar evento", err);
     }
   });
 
-  // DELETE /eventos/:id
-  app.delete('/:id', async (req: FastifyRequest, reply: FastifyReply) => {
+  // DELETE /eventos/:id (SOLIDO)
+  app.delete("/:id", async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = IdParam.safeParse(req.params);
     if (!parsed.success) {
-      return reply.code(400).send({ ok: false, message: 'ID inválido' });
+      return reply.code(400).send({ ok: false, message: "ID inválido" });
     }
 
     const id = Number(parsed.data.id);
 
     try {
-      const [result]: any = await db.query(
-        'DELETE FROM eventos WHERE id = ?',
-        [id]
-      );
+      const [result]: any = await db.query("DELETE FROM eventos WHERE id = ?", [id]);
 
-      if (result.affectedRows === 0) {
-        return reply.code(404).send({ ok: false, message: 'No encontrado' });
+      if (!result?.affectedRows) {
+        return reply.code(404).send({ ok: false, message: "No encontrado" });
       }
 
-      reply.send({ ok: true, deleted: id });
+      return reply.send({ ok: true, deleted: id });
     } catch (err: any) {
-      reply.code(500).send({
-        ok: false,
-        message: 'Error al eliminar evento',
-        error: err?.message
-      });
+      // 🔥 Esto te dirá la verdad en prod
+      req.log.error({ err, id }, "DELETE /eventos/:id failed");
+
+      // FK constraint (lo más común en 500 al borrar)
+      if (err?.errno === 1451) {
+        return reply.code(409).send({
+          ok: false,
+          message: "No se puede eliminar: el evento está asociado a otros registros",
+        });
+      }
+
+      return sendDbError(reply, "Error al eliminar evento", err);
     }
   });
 }
