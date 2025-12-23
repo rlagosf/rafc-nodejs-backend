@@ -24,7 +24,8 @@ const RutParam = z.object({
 const PageQuery = z.object({
   limit: z.coerce.number().int().positive().max(200).optional().default(100),
   offset: z.coerce.number().int().nonnegative().optional().default(0),
-  q: z.string().trim().min(1).max(100).optional(),  // proteges de strings gigantes
+  q: z.string().trim().min(1).max(100).optional(),
+  include_inactivos: z.coerce.number().int().optional().default(0), // 👈 NUEVO (0/1)
 });
 
 const BaseFields = {
@@ -49,11 +50,15 @@ const BaseFields = {
   prevision_medica_id: z.union([z.number().int(), z.string().regex(/^\d+$/)]).optional(),
   estado_id: z.union([z.number().int(), z.string().regex(/^\d+$/)]).optional(),
 
+  // 🆕 NUEVOS CAMPOS
+  direccion: z.string().trim().optional(),
+  comuna_id: z.union([z.number().int(), z.string().regex(/^\d+$/)]).optional(),
+
   observaciones: z.string().trim().optional(),
   fecha_nacimiento: z.union([z.string(), z.date()]).optional(),
-
   sucursal_id: z.union([z.number().int(), z.string().regex(/^\d+$/)]).nullable().optional(),
 };
+
 
 const CreateSchema = z.object({
   ...BaseFields,
@@ -67,8 +72,9 @@ const allowedKeys = new Set([
   'nombre_jugador', 'rut_jugador', 'email', 'telefono', 'edad', 'peso', 'estatura',
   'talla_polera', 'talla_short', 'nombre_apoderado', 'rut_apoderado', 'telefono_apoderado',
   'posicion_id', 'categoria_id', 'establec_educ_id', 'prevision_medica_id', 'estado_id',
-  'observaciones', 'fecha_nacimiento', 'sucursal_id',
+  'direccion', 'comuna_id', 'observaciones', 'fecha_nacimiento', 'sucursal_id',
 ]);
+
 
 function pickAllowed(body: Record<string, any>) {
   const out: Record<string, any> = {};
@@ -83,8 +89,10 @@ function coerceForDB(row: Record<string, any>) {
 
   const asInt = [
     'edad', 'posicion_id', 'categoria_id', 'establec_educ_id',
-    'prevision_medica_id', 'estado_id', 'rut_jugador', 'rut_apoderado', 'sucursal_id',
+    'prevision_medica_id', 'estado_id', 'rut_jugador', 'rut_apoderado',
+    'sucursal_id', 'comuna_id',
   ];
+
   for (const k of asInt) {
     if (k in out && out[k] !== null && out[k] !== undefined && out[k] !== '') {
       const n = Number.parseInt(String(out[k]), 10);
@@ -147,11 +155,14 @@ function normalizeOut(row: any) {
     establec_educ_id: row.establec_educ_id != null ? Number(row.establec_educ_id) : null,
     prevision_medica_id: row.prevision_medica_id != null ? Number(row.prevision_medica_id) : null,
     estado_id: row.estado_id != null ? Number(row.estado_id) : null,
+    direccion: row.direccion ?? null,
+    comuna_id: row.comuna_id != null ? Number(row.comuna_id) : null,
     observaciones: row.observaciones ?? null,
     fecha_nacimiento: row.fecha_nacimiento ?? null,
     estadistica_id: row.estadistica_id != null ? Number(row.estadistica_id) : null,
     sucursal_id: row.sucursal_id != null ? Number(row.sucursal_id) : null,
   };
+
 }
 
 export default async function jugadores(app: FastifyInstance) {
@@ -163,32 +174,44 @@ export default async function jugadores(app: FastifyInstance) {
   }));
 
   // ───────── Listar ─────────
+  // ───────── Listar ─────────
   app.get('/', async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = PageQuery.safeParse(req.query);
-    const { limit, offset, q } = parsed.success ? parsed.data : { limit: 100, offset: 0, q: undefined };
+    const { limit, offset, q, include_inactivos } = parsed.success
+      ? parsed.data
+      : { limit: 100, offset: 0, q: undefined, include_inactivos: 0 };
 
     try {
       let sql =
         'SELECT id, rut_jugador, nombre_jugador, edad, email, telefono, peso, estatura, ' +
         'talla_polera, talla_short, nombre_apoderado, rut_apoderado, telefono_apoderado, ' +
         'posicion_id, categoria_id, establec_educ_id, prevision_medica_id, estado_id, ' +
+        'direccion, comuna_id, ' +
         'observaciones, fecha_nacimiento, estadistica_id, sucursal_id ' +
         'FROM jugadores';
 
       const args: any[] = [];
+      const where: string[] = [];
 
+      // ✅ Por defecto: solo activos
+      if (Number(include_inactivos) !== 1) {
+        where.push('estado_id = 1');
+      }
+
+      // 🔎 Buscador (q)
       if (q) {
         const isNumeric = /^\d+$/.test(q);
 
         if (isNumeric) {
-          // Caso RUT: permite usar índice en rut_jugador por igualdad
-          sql += ' WHERE rut_jugador = ? OR nombre_jugador LIKE ? OR email LIKE ?';
+          where.push('(rut_jugador = ? OR nombre_jugador LIKE ? OR email LIKE ?)');
           args.push(Number(q), `%${q}%`, `%${q}%`);
         } else {
-          sql += ' WHERE nombre_jugador LIKE ? OR email LIKE ?';
+          where.push('(nombre_jugador LIKE ? OR email LIKE ?)');
           args.push(`%${q}%`, `%${q}%`);
         }
       }
+
+      if (where.length) sql += ' WHERE ' + where.join(' AND ');
 
       sql += ' ORDER BY nombre_jugador ASC, id ASC LIMIT ? OFFSET ?';
       args.push(limit, offset);
@@ -200,17 +223,69 @@ export default async function jugadores(app: FastifyInstance) {
         items: (rows || []).map(normalizeOut),
         limit,
         offset,
-        count: rows?.length ?? 0
+        count: rows?.length ?? 0,
+        filters: { q: q ?? null, include_inactivos: Number(include_inactivos) === 1 ? 1 : 0 },
       });
-
     } catch (err: any) {
       reply.code(500).send({
         ok: false,
         message: 'Error al listar jugadores',
-        detail: err?.message
+        detail: err?.message,
       });
     }
   });
+
+  app.get('/activos', async (req: FastifyRequest, reply: FastifyReply) => {
+    const parsed = PageQuery.safeParse(req.query);
+    const { limit, offset, q } = parsed.success
+      ? parsed.data
+      : { limit: 100, offset: 0, q: undefined };
+
+    try {
+      let sql =
+        'SELECT id, rut_jugador, nombre_jugador, edad, email, telefono, peso, estatura, ' +
+        'talla_polera, talla_short, nombre_apoderado, rut_apoderado, telefono_apoderado, ' +
+        'posicion_id, categoria_id, establec_educ_id, prevision_medica_id, estado_id, ' +
+        'direccion, comuna_id, '
+        'observaciones, fecha_nacimiento, estadistica_id, sucursal_id ' +
+        'FROM jugadores';
+
+      const args: any[] = [];
+      const where: string[] = ['estado_id = 1']; // ✅ SOLO ACTIVOS
+
+      if (q) {
+        const isNumeric = /^\d+$/.test(q);
+        if (isNumeric) {
+          where.push('(rut_jugador = ? OR nombre_jugador LIKE ? OR email LIKE ?)');
+          args.push(Number(q), `%${q}%`, `%${q}%`);
+        } else {
+          where.push('(nombre_jugador LIKE ? OR email LIKE ?)');
+          args.push(`%${q}%`, `%${q}%`);
+        }
+      }
+
+      sql += ' WHERE ' + where.join(' AND ');
+      sql += ' ORDER BY nombre_jugador ASC, id ASC LIMIT ? OFFSET ?';
+      args.push(limit, offset);
+
+      const [rows]: any = await db.query(sql, args);
+
+      reply.send({
+        ok: true,
+        items: (rows || []).map(normalizeOut),
+        limit,
+        offset,
+        count: rows?.length ?? 0,
+      });
+    } catch (err: any) {
+      reply.code(500).send({
+        ok: false,
+        message: 'Error al listar jugadores activos',
+        detail: err?.message,
+      });
+    }
+  });
+
 
   // ───────── GET por RUT ─────────
   app.get('/rut/:rut', async (req: FastifyRequest, reply: FastifyReply) => {
@@ -334,6 +409,7 @@ export default async function jugadores(app: FastifyInstance) {
         { field: 'establec_educ_id', sql: 'SELECT 1 FROM establec_educ WHERE id = ? LIMIT 1', val: data.establec_educ_id },
         { field: 'prevision_medica_id', sql: 'SELECT 1 FROM prevision_medica WHERE id = ? LIMIT 1', val: data.prevision_medica_id },
         { field: 'sucursal_id', sql: 'SELECT 1 FROM sucursales_real WHERE id = ? LIMIT 1', val: data.sucursal_id },
+        { field: 'comuna_id', sql: 'SELECT 1 FROM comunas WHERE id = ? LIMIT 1', val: data.comuna_id },
       ];
 
       for (const fk of fkChecks) {

@@ -60,6 +60,9 @@ const Jugador = {
     edad: { type: ['integer', 'null'] },
     email: { type: ['string', 'null'] },
     telefono: { type: ['string', 'null'] },
+    direccion: { type: ['string', 'null'] },
+    comuna_id: { type: ['integer', 'null'] },
+
     peso: { type: ['number', 'null'] },
     estatura: { type: ['number', 'null'] },
 

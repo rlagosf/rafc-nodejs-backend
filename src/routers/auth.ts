@@ -6,8 +6,14 @@ import jwt, { SignOptions } from 'jsonwebtoken';
 import { db } from '../db';
 import { CONFIG } from '../config';
 
-// -------- Helpers de auditoría --------
-type AuditEvent = 'login' | 'logout' | 'refresh' | 'invalid_token' | 'access_denied';
+/* ───────────────────────── Auditoría ───────────────────────── */
+
+type AuditEvent =
+  | 'login'
+  | 'logout'
+  | 'refresh'
+  | 'invalid_token'
+  | 'access_denied';
 
 async function audit(
   event: AuditEvent,
@@ -20,15 +26,15 @@ async function audit(
     const ip =
       (Array.isArray(req.headers['x-forwarded-for'])
         ? req.headers['x-forwarded-for'][0]
-        : req.headers['x-forwarded-for'] as string) || req.ip;
+        : (req.headers['x-forwarded-for'] as string)) || req.ip;
 
     const userAgent = (req.headers['user-agent'] as string) || null;
     const route = req.raw?.url || '';
     const method = req.method || 'GET';
 
     await db.query(
-      `INSERT INTO auth_audit 
-       (user_id, event, route, method, status_code, ip, user_agent, extra) 
+      `INSERT INTO auth_audit
+       (user_id, event, route, method, status_code, ip, user_agent, extra)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         userId ?? null,
@@ -46,52 +52,49 @@ async function audit(
   }
 }
 
-// -------- Esquema Login --------
+/* ───────────────────────── Schemas ───────────────────────── */
+
 const LoginSchema = z.object({
   nombre_usuario: z.string().min(3),
   password: z.string().min(4),
 });
 
+/* ───────────────────────── Router ───────────────────────── */
+
 export default async function auth(app: FastifyInstance) {
-  // Health
-  app.get('/health', { schema: { tags: ['Auth'] } }, async () => ({
+  /* ───────── Health ───────── */
+  app.get('/health', async () => ({
     module: 'auth',
     status: 'ready',
     timestamp: new Date().toISOString(),
   }));
 
-  // POST /auth/login (público)
+  /* ───────── POST /auth/login ───────── */
   app.post(
     '/login',
-    {
-      schema: {
-        tags: ['Auth'],
-        security: [],
-      },
-    },
+    { schema: { security: [] } },
     async (req: FastifyRequest, reply: FastifyReply) => {
-      // Validación
-      const parsed = LoginSchema.safeParse((req as any).body);
+      const parsed = LoginSchema.safeParse(req.body);
       if (!parsed.success) {
-        audit('access_denied', req, 400, null, { reason: 'invalid_payload' });
+        void audit('access_denied', req, 400, null, {
+          reason: 'invalid_payload',
+        });
         return reply.code(400).send({ ok: false, message: 'Payload inválido' });
       }
 
-      const nombre_usuario = parsed.data.nombre_usuario.trim();
-      const password = parsed.data.password;
+      const { nombre_usuario, password } = parsed.data;
 
       try {
-        // IMPORTANTE: evitar LOWER(...) para permitir índice
         const [rows]: any = await db.query(
           `SELECT id, nombre_usuario, email, password, rol_id, estado_id
            FROM usuarios
            WHERE nombre_usuario = BINARY ?
            LIMIT 1`,
-          [nombre_usuario]
+          [nombre_usuario.trim()]
         );
 
         if (!rows.length) {
-          audit('access_denied', req, 401, null, {
+          void audit('access_denied', req, 401, null, {
             reason: 'user_not_found',
             nombre_usuario,
           });
@@ -100,16 +103,14 @@ export default async function auth(app: FastifyInstance) {
 
         const user = rows[0];
 
-        // Verificación Argon2
         const ok = await argon2Verify(user.password, password);
         if (!ok) {
-          audit('access_denied', req, 401, user.id, {
+          void audit('access_denied', req, 401, user.id, {
             reason: 'bad_password',
           });
           return reply.code(401).send({ ok: false, message: 'Credenciales inválidas' });
         }
 
-        // JWT
         const payload = {
           sub: user.id,
           nombre_usuario: user.nombre_usuario,
@@ -118,13 +119,14 @@ export default async function auth(app: FastifyInstance) {
 
         const signOpts: SignOptions = {};
         if (CONFIG.JWT_EXPIRES_IN) {
-          signOpts.expiresIn = CONFIG.JWT_EXPIRES_IN as unknown as jwt.SignOptions['expiresIn'];
+          signOpts.expiresIn =
+            CONFIG.JWT_EXPIRES_IN as unknown as jwt.SignOptions['expiresIn'];
         }
-
 
         const rafc_token = jwt.sign(payload, CONFIG.JWT_SECRET, signOpts);
 
-        audit('login', req, 200, user.id);
+        // 🔥 auditoría NO bloqueante
+        void audit('login', req, 200, user.id);
 
         return reply.send({
           ok: true,
@@ -140,11 +142,11 @@ export default async function auth(app: FastifyInstance) {
         });
       } catch (err: any) {
         req.log.error({ err }, 'auth/login failed');
-        audit('access_denied', req, 400, null, {
+        void audit('access_denied', req, 500, null, {
           reason: 'exception',
           message: err?.message,
         });
-        return reply.code(400).send({
+        return reply.code(500).send({
           ok: false,
           message: 'Error procesando login',
         });
@@ -152,18 +154,13 @@ export default async function auth(app: FastifyInstance) {
     }
   );
 
-  // POST /auth/logout
+  /* ───────── POST /auth/logout ───────── */
   app.post('/logout', async (req: FastifyRequest, reply: FastifyReply) => {
-    try {
-      const userId = (req as any).user?.id ?? null;
-      audit('logout', req, 200, userId);
-      return reply.send({ ok: true, message: 'logout' });
-    } catch (err: any) {
-      req.log.error({ err }, 'auth/logout failed');
-      return reply.code(400).send({
-        ok: false,
-        message: err?.message ?? 'Error en logout',
-      });
-    }
+    const userId = (req as any).user?.id ?? null;
+
+    // 🔥 auditoría NO bloqueante
+    void audit('logout', req, 200, userId);
+
+    return reply.send({ ok: true, message: 'logout' });
   });
 }

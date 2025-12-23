@@ -9,6 +9,9 @@ import jugadores from './routers/jugadores';
 import medio_pago from './routers/medio_pago';
 import pagos_jugador from './routers/pagos_jugador';
 import categorias from './routers/categorias';
+import comunas from './routers/comunas';
+import contratos_jugadores from './routers/contratos_jugadores';
+import contratos_firma_tokens from './routers/contratos_firma_tokens';
 import eventos from './routers/eventos';
 import posiciones from './routers/posiciones';
 import estado from './routers/estado';
@@ -34,6 +37,8 @@ export async function registerRoutes(app: FastifyInstance) {
   app.register(jugadores, { prefix: `${API_BASE}/jugadores` });
   app.register(categorias, { prefix: `${API_BASE}/categorias` });
   app.register(eventos, { prefix: `${API_BASE}/eventos` });
+  app.register(contratos_jugadores, { prefix: `${API_BASE}/contratos-jugadores` });
+  app.register(contratos_jugadores, { prefix: `${API_BASE}/contratos-firma-tokens` });
 
   // Pagos
   app.register(medio_pago, { prefix: `${API_BASE}/medio-pago` });
@@ -42,6 +47,7 @@ export async function registerRoutes(app: FastifyInstance) {
   app.register(situacion_pago, { prefix: `${API_BASE}/situacion-pago` });
 
   // Catálogos / auxiliares
+  app.register(comunas, { prefix: `${API_BASE}/comunas` });
   app.register(posiciones, { prefix: `${API_BASE}/posiciones` });
   app.register(estado, { prefix: `${API_BASE}/estado` });
   app.register(prevision_medica, { prefix: `${API_BASE}/prevision-medica` });
