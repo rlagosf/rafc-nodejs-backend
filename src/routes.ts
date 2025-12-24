@@ -38,7 +38,7 @@ export async function registerRoutes(app: FastifyInstance) {
   app.register(categorias, { prefix: `${API_BASE}/categorias` });
   app.register(eventos, { prefix: `${API_BASE}/eventos` });
   app.register(contratos_jugadores, { prefix: `${API_BASE}/contratos-jugadores` });
-  app.register(contratos_jugadores, { prefix: `${API_BASE}/contratos-firma-tokens` });
+  app.register(contratos_firma_tokens, { prefix: `${API_BASE}/contratos-firma-tokens` });
 
   // Pagos
   app.register(medio_pago, { prefix: `${API_BASE}/medio-pago` });
@@ -57,7 +57,6 @@ export async function registerRoutes(app: FastifyInstance) {
   // Estadísticas y convocatorias
   app.register(estadisticas, { prefix: `${API_BASE}/estadisticas` });
   app.register(convocatorias, { prefix: `${API_BASE}/convocatorias` });
-  app.register(convocatorias_historico, {
-    prefix: `${API_BASE}/convocatorias-historico`,
+  app.register(convocatorias_historico, { prefix: `${API_BASE}/convocatorias-historico`,
   });
 }
