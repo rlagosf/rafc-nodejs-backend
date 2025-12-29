@@ -3,6 +3,7 @@ import { FastifyInstance } from 'fastify';
 
 // Routers
 import auth from './routers/auth';
+import auth_apoderado  from './routers/auth_apoderado';
 import usuarios from './routers/usuarios';
 import roles from './routers/roles';
 import jugadores from './routers/jugadores';
@@ -19,6 +20,7 @@ import prevision_medica from './routers/prevision_medica';
 import establec_educ from './routers/establec_educ';
 import estadisticas from './routers/estadisticas';
 import convocatorias from './routers/convocatorias';
+import portal_apoderado from './routers/portal_apoderado';
 import convocatorias_historico from './routers/convocatorias_historico';
 import tipo_pago from './routers/tipo_pago';
 import situacion_pago from './routers/situacion_pago';
@@ -30,6 +32,8 @@ export async function registerRoutes(app: FastifyInstance) {
 
   // Core
   app.register(auth, { prefix: `${API_BASE}/auth` });
+  app.register(auth_apoderado, {prefix: `${API_BASE}/auth-apoderado`})
+  app.register(portal_apoderado, { prefix: `${API_BASE}/portal-apoderado` });
   app.register(usuarios, { prefix: `${API_BASE}/usuarios` });
   app.register(roles, { prefix: `${API_BASE}/roles` });
 
