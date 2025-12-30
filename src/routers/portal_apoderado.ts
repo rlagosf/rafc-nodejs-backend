@@ -49,6 +49,7 @@ export default async function portal_apoderado(
   _opts: FastifyPluginOptions
 ) {
   // GET /api/portal-apoderado/mis-jugadores
+  // GET /api/portal-apoderado/mis-jugadores
   app.get("/mis-jugadores", async (req, reply) => {
     const tokenData = verifyApoderadoToken(req.headers.authorization);
     if (!tokenData) {
@@ -62,15 +63,94 @@ export default async function portal_apoderado(
 
     const db = getDb();
     const [rows] = await db.query<any[]>(
-      `SELECT rut_jugador, nombres, apellidos
-       FROM jugadores
-       WHERE rut_apoderado = ?
-       ORDER BY apellidos, nombres`,
+      `SELECT 
+        rut_jugador,
+        nombre_jugador,
+        estado_id,
+        categoria_id,
+        posicion_id
+     FROM jugadores
+     WHERE rut_apoderado = ?
+     ORDER BY nombre_jugador ASC`,
       [tokenData.rut]
     );
 
     return reply.send({ ok: true, jugadores: rows });
   });
+
+  // GET /api/portal-apoderado/jugadores/:rut/resumen
+  app.get("/jugadores/:rut/resumen", async (req, reply) => {
+    const tokenData = verifyApoderadoToken(req.headers.authorization);
+    if (!tokenData) return reply.code(401).send({ ok: false, message: "UNAUTHORIZED" });
+
+    const guard = await requireApoderadoPortalOk(tokenData.rut);
+    if (!guard.ok) return reply.code(guard.code).send({ ok: false, message: guard.message });
+
+    const parsed = RutJugadorParam.safeParse(req.params);
+    if (!parsed.success) return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
+
+    const rutJugador = parsed.data.rut;
+    const db = getDb();
+
+    // ✅ valida pertenencia
+    const [own] = await db.query<any[]>(
+      `SELECT 1
+     FROM jugadores
+     WHERE rut_jugador = ? AND rut_apoderado = ?
+     LIMIT 1`,
+      [rutJugador, tokenData.rut]
+    );
+    if (!own?.length) return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
+
+    // ✅ datos del jugador (ajusta columnas si alguna difiere)
+    const [jugRows] = await db.query<any[]>(
+      `SELECT
+       id,
+       rut_jugador,
+       nombre_jugador,
+       fecha_nacimiento,
+       edad,
+       telefono,
+       email,
+       direccion,
+       comuna_id,
+       posicion_id,
+       categoria_id,
+       talla_polera,
+       talla_short,
+       establec_educ_id,
+       prevision_medica_id,
+       nombre_apoderado,
+       rut_apoderado,
+       telefono_apoderado,
+       peso,
+       estatura,
+       observaciones,
+       estado_id,
+       estadistica_id,
+       sucursal_id
+     FROM jugadores
+     WHERE rut_jugador = ?
+     LIMIT 1`,
+      [rutJugador]
+    );
+
+    const jugador = jugRows?.[0] ?? null;
+    if (!jugador) return reply.code(404).send({ ok: false, message: "NOT_FOUND" });
+
+    // ✅ pagos del jugador
+    const [pagos] = await db.query<any[]>(
+      `SELECT *
+     FROM pagos_jugador
+     WHERE jugador_rut = ?
+     ORDER BY fecha_pago DESC`,
+      [rutJugador]
+    );
+
+    return reply.send({ ok: true, jugador, pagos });
+  });
+
+
 
   // GET /api/portal-apoderado/jugadores/:rut/pagos
   app.get("/jugadores/:rut/pagos", async (req, reply) => {

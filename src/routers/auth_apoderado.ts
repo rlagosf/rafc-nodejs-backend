@@ -20,6 +20,7 @@ const ChangePasswordSchema = z.object({
 type ApoderadoToken = { type: "apoderado"; rut: string };
 
 function signApoderadoToken(payload: ApoderadoToken) {
+  if (!JWT_SECRET) throw new Error("JWT_SECRET missing");
   return jwt.sign(payload, JWT_SECRET, { expiresIn: "12h" });
 }
 
@@ -43,13 +44,13 @@ function verifyApoderadoToken(authHeader?: string): ApoderadoToken | null {
 
 /**
  * Router default export (igual que los otros)
- * Se registra con prefix: /api/auth_apoderado
+ * Se registra con prefix: /api/auth-apoderado
  */
 export default async function auth_apoderado(
   app: FastifyInstance,
   _opts: FastifyPluginOptions
 ) {
-  // POST /api/auth_apoderado/login
+  // POST /api/auth-apoderado/login  ✅ PUBLICO
   app.post("/login", async (req, reply) => {
     const parsed = LoginSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -78,21 +79,22 @@ export default async function auth_apoderado(
       return reply.code(401).send({ ok: false, message: "INVALID_CREDENTIALS" });
     }
 
-    const token = signApoderadoToken({ type: "apoderado", rut });
+    const rafc_token = signApoderadoToken({ type: "apoderado", rut });
 
     await db.query(
       `UPDATE apoderados_auth SET last_login_at = NOW() WHERE rut_apoderado = ?`,
       [rut]
     );
 
+    // ✅ IMPORTANTÍSIMO: devolver rafc_token (homologado con admin)
     return reply.send({
       ok: true,
-      token,
+      rafc_token,
       must_change_password: Number(auth.must_change_password) === 1,
     });
   });
 
-  // GET /api/auth_apoderado/me
+  // GET /api/auth-apoderado/me  🔒 PROTEGIDO
   app.get("/me", async (req, reply) => {
     const tokenData = verifyApoderadoToken(req.headers.authorization);
     if (!tokenData) {
@@ -115,7 +117,7 @@ export default async function auth_apoderado(
     return reply.send({ ok: true, apoderado: rows[0] });
   });
 
-  // POST /api/auth_apoderado/change-password
+  // POST /api/auth-apoderado/change-password  🔒 PROTEGIDO
   app.post("/change-password", async (req, reply) => {
     const tokenData = verifyApoderadoToken(req.headers.authorization);
     if (!tokenData) {

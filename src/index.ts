@@ -162,30 +162,35 @@ async function bootstrap() {
   /* ───────── Autenticación global JWT ───────── */
 
   const PUBLIC = [
-    // Raíz / API root
-    /^\/$/i,
-    /^\/api\/?$/i,
+  // Raíz / API root
+  /^\/$/i,
+  /^\/api\/?$/i,
 
-    // Health (con o sin /api)
-    /^\/health(?:\/.*)?$/i,
-    /^\/api\/health(?:\/.*)?$/i,
+  // Health (con o sin /api)
+  /^\/health(?:\/.*)?$/i,
+  /^\/api\/health(?:\/.*)?$/i,
 
-    // LOGIN: permitir /auth/login y /api/auth/login (con o sin query / slash)
-    /^\/auth\/login(?:\/.*)?$/i,
-    /^\/api\/auth\/login(?:\/.*)?$/i,
+  // LOGIN ADMIN
+  /^\/auth\/login(?:\/.*)?$/i,
+  /^\/api\/auth\/login(?:\/.*)?$/i,
 
-    // LOGOUT (si quieres dejarlo sin token; si no, puedes quitar estas dos)
-    /^\/auth\/logout(?:\/.*)?$/i,
-    /^\/api\/auth\/logout(?:\/.*)?$/i,
+  // ✅ LOGIN APODERADOS (NUEVO)
+  /^\/auth-apoderado\/login(?:\/.*)?$/i,
+  /^\/api\/auth-apoderado\/login(?:\/.*)?$/i,
 
-    // Swagger / Docs
-    /^\/docs(?:\/.*)?$/i,
-    /^\/swagger(?:\/.*)?$/i,
+  // LOGOUT
+  /^\/auth\/logout(?:\/.*)?$/i,
+  /^\/api\/auth\/logout(?:\/.*)?$/i,
 
-    // Estáticos básicos
-    /^\/favicon\.ico$/i,
-    /^\/robots\.txt$/i,
-  ];
+  // Swagger / Docs
+  /^\/docs(?:\/.*)?$/i,
+  /^\/swagger(?:\/.*)?$/i,
+
+  // Estáticos básicos
+  /^\/favicon\.ico$/i,
+  /^\/robots\.txt$/i,
+];
+
 
   app.addHook('onRequest', async (req, reply) => {
     if (req.method === 'OPTIONS' || req.method === 'HEAD') return;
