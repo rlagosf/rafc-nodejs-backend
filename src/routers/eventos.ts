@@ -56,9 +56,12 @@ function sendDbError(reply: FastifyReply, message: string, err: any) {
   return reply.code(500).send({
     ok: false,
     message,
-    error: err?.message,
+    error: err?.sqlMessage || err?.message || String(err),
+    errno: err?.errno,
+    code: err?.code,
   });
 }
+
 
 export default async function eventos(app: FastifyInstance) {
   // Health
@@ -279,18 +282,22 @@ export default async function eventos(app: FastifyInstance) {
 
       return reply.send({ ok: true, deleted: id });
     } catch (err: any) {
-      // 🔥 Esto te dirá la verdad en prod
-      req.log.error({ err, id }, "DELETE /eventos/:id failed");
+      req.log.error(
+        { err, id, errno: err?.errno, code: err?.code, sqlMessage: err?.sqlMessage },
+        "DELETE /eventos/:id failed"
+      );
 
-      // FK constraint (lo más común en 500 al borrar)
-      if (err?.errno === 1451) {
+      // MariaDB/MySQL: FK constraint
+      if (err?.errno === 1451 || String(err?.code || "").includes("ER_ROW_IS_REFERENCED")) {
         return reply.code(409).send({
           ok: false,
           message: "No se puede eliminar: el evento está asociado a otros registros",
+          error: err?.sqlMessage || err?.message,
         });
       }
 
       return sendDbError(reply, "Error al eliminar evento", err);
     }
   });
+
 }
