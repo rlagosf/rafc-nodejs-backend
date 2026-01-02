@@ -162,34 +162,34 @@ async function bootstrap() {
   /* ───────── Autenticación global JWT ───────── */
 
   const PUBLIC = [
-  // Raíz / API root
-  /^\/$/i,
-  /^\/api\/?$/i,
+    // Raíz / API root
+    /^\/$/i,
+    /^\/api\/?$/i,
 
-  // Health (con o sin /api)
-  /^\/health(?:\/.*)?$/i,
-  /^\/api\/health(?:\/.*)?$/i,
+    // Health (con o sin /api)
+    /^\/health(?:\/.*)?$/i,
+    /^\/api\/health(?:\/.*)?$/i,
 
-  // LOGIN ADMIN
-  /^\/auth\/login(?:\/.*)?$/i,
-  /^\/api\/auth\/login(?:\/.*)?$/i,
+    // LOGIN ADMIN
+    /^\/auth\/login(?:\/.*)?$/i,
+    /^\/api\/auth\/login(?:\/.*)?$/i,
 
-  // ✅ LOGIN APODERADOS (NUEVO)
-  /^\/auth-apoderado\/login(?:\/.*)?$/i,
-  /^\/api\/auth-apoderado\/login(?:\/.*)?$/i,
+    // ✅ LOGIN APODERADOS (NUEVO)
+    /^\/auth-apoderado\/login(?:\/.*)?$/i,
+    /^\/api\/auth-apoderado\/login(?:\/.*)?$/i,
 
-  // LOGOUT
-  /^\/auth\/logout(?:\/.*)?$/i,
-  /^\/api\/auth\/logout(?:\/.*)?$/i,
+    // LOGOUT
+    /^\/auth\/logout(?:\/.*)?$/i,
+    /^\/api\/auth\/logout(?:\/.*)?$/i,
 
-  // Swagger / Docs
-  /^\/docs(?:\/.*)?$/i,
-  /^\/swagger(?:\/.*)?$/i,
+    // Swagger / Docs
+    /^\/docs(?:\/.*)?$/i,
+    /^\/swagger(?:\/.*)?$/i,
 
-  // Estáticos básicos
-  /^\/favicon\.ico$/i,
-  /^\/robots\.txt$/i,
-];
+    // Estáticos básicos
+    /^\/favicon\.ico$/i,
+    /^\/robots\.txt$/i,
+  ];
 
 
   app.addHook('onRequest', async (req, reply) => {
@@ -212,15 +212,24 @@ async function bootstrap() {
       const token = auth.substring(7);
       const payload: any = jwt.verify(token, CONFIG.JWT_SECRET);
 
+      // ✅ Soporte apoderado (token con { type, rut })
+      if (payload?.type === "apoderado") {
+        (req as any).user = {
+          type: "apoderado",
+          rut: String(payload.rut ?? ""),
+        };
+        return;
+      }
+
+      // ✅ Soporte admin/staff (token con { sub, rol_id, nombre_usuario })
       (req as any).user = {
+        type: "admin", // o "staff" si lo modelas luego
         id: payload.sub,
         rol_id: payload.rol_id,
         nombre_usuario: payload.nombre_usuario,
       };
     } catch {
-      return reply
-        .code(401)
-        .send({ ok: false, message: 'Token inválido o expirado' });
+      return reply.code(401).send({ ok: false, message: "Token inválido o expirado" });
     }
   });
 

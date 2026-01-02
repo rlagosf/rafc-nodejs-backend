@@ -4,8 +4,9 @@ import jwt from "jsonwebtoken";
 import * as argon2 from "@node-rs/argon2";
 import { z } from "zod";
 import { getDb } from "../db";
+import { CONFIG } from "../config";
 
-const JWT_SECRET = process.env.JWT_SECRET as string;
+const JWT_SECRET = CONFIG.JWT_SECRET;
 
 const LoginSchema = z.object({
   rut: z.string().regex(/^\d{8}$/), // 8 dígitos, sin DV
