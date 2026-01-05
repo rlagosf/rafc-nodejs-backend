@@ -1,165 +1,289 @@
 // src/schemas/schemas.ts
-import { FastifyInstance } from 'fastify';
+import { FastifyInstance } from "fastify";
 
 /* ───────────────────────────────────────────────
    🔷 UTILIDADES BASE: Reutilizables en toda la API
 ─────────────────────────────────────────────── */
 
+// Estándar: listados paginados usan total (no count)
 const Pagination = {
-  type: 'object',
+  type: "object",
   properties: {
-    limit: { type: 'integer' },
-    offset: { type: 'integer' },
-    count: { type: 'integer' },
+    limit: { type: "integer" },
+    offset: { type: "integer" },
+    total: { type: "integer" },
   },
 } as const;
 
 const OkOnly = {
-  type: 'object',
-  properties: { ok: { type: 'boolean' } },
-  required: ['ok'],
+  $id: "OkOnly",
+  type: "object",
+  properties: { ok: { type: "boolean" } },
+  required: ["ok"],
 } as const;
 
 /* ───────────────────────────────────────────────
-   🔶 CATÁLOGOS (id + nombre)
+   🔶 CATÁLOGOS (id + nombre)  ✅ (sin count/total)
 ─────────────────────────────────────────────── */
 
 const CatalogoItem = {
-  $id: 'CatalogoItem',
-  type: 'object',
+  $id: "CatalogoItem",
+  type: "object",
   properties: {
-    id: { type: 'integer' },
-    nombre: { type: 'string' },
+    id: { type: "integer" },
+    nombre: { type: "string" },
   },
-  required: ['id', 'nombre'],
+  required: ["id", "nombre"],
 } as const;
 
 const CatalogoListResponse = {
-  $id: 'CatalogoListResponse',
-  type: 'object',
+  $id: "CatalogoListResponse",
+  type: "object",
   properties: {
-    ok: { type: 'boolean' },
-    items: { type: 'array', items: { $ref: 'CatalogoItem#' } },
-    count: { type: 'integer' },
+    ok: { type: "boolean" },
+    items: { type: "array", items: { $ref: "CatalogoItem#" } },
   },
-  required: ['ok', 'items'],
+  required: ["ok", "items"],
 } as const;
 
 /* ───────────────────────────────────────────────
    🔶 JUGADORES
+   ✅ RUT como string (consistente con auth)
 ─────────────────────────────────────────────── */
 
 const Jugador = {
-  $id: 'Jugador',
-  type: 'object',
+  $id: "Jugador",
+  type: "object",
   properties: {
-    id: { type: 'integer' },
-    rut_jugador: { type: 'integer' },
-    nombre_jugador: { type: 'string' },
+    id: { type: "integer" },
 
-    edad: { type: ['integer', 'null'] },
-    email: { type: ['string', 'null'] },
-    telefono: { type: ['string', 'null'] },
-    direccion: { type: ['string', 'null'] },
-    comuna_id: { type: ['integer', 'null'] },
+    rut_jugador: { type: "string" }, // ✅ string
+    nombre_jugador: { type: "string" },
 
-    peso: { type: ['number', 'null'] },
-    estatura: { type: ['number', 'null'] },
+    edad: { type: ["integer", "null"] },
+    email: { type: ["string", "null"] },
+    telefono: { type: ["string", "null"] },
+    direccion: { type: ["string", "null"] },
+    comuna_id: { type: ["integer", "null"] },
 
-    talla_polera: { type: ['string', 'null'] },
-    talla_short: { type: ['string', 'null'] },
+    peso: { type: ["number", "null"] },
+    estatura: { type: ["number", "null"] },
 
-    nombre_apoderado: { type: ['string', 'null'] },
-    rut_apoderado: { type: ['integer', 'null'] },
-    telefono_apoderado: { type: ['string', 'null'] },
+    talla_polera: { type: ["string", "null"] },
+    talla_short: { type: ["string", "null"] },
 
-    posicion_id: { type: ['integer', 'null'] },
-    categoria_id: { type: ['integer', 'null'] },
-    establec_educ_id: { type: ['integer', 'null'] },
-    prevision_medica_id: { type: ['integer', 'null'] },
-    estado_id: { type: ['integer', 'null'] },
-    sucursal_id: { type: ['integer', 'null'] },
+    nombre_apoderado: { type: ["string", "null"] },
+    rut_apoderado: { type: ["string", "null"] }, // ✅ string
+    telefono_apoderado: { type: ["string", "null"] },
 
-    estadistica_id: { type: ['integer', 'null'] },
+    posicion_id: { type: ["integer", "null"] },
+    categoria_id: { type: ["integer", "null"] },
+    establec_educ_id: { type: ["integer", "null"] },
+    prevision_medica_id: { type: ["integer", "null"] },
+    estado_id: { type: ["integer", "null"] },
+    sucursal_id: { type: ["integer", "null"] },
 
-    observaciones: { type: ['string', 'null'] },
-    fecha_nacimiento: { type: ['string', 'null'], format: 'date' },
+    estadistica_id: { type: ["integer", "null"] },
+
+    observaciones: { type: ["string", "null"] },
+    fecha_nacimiento: { type: ["string", "null"], format: "date" },
   },
-  required: ['id', 'nombre_jugador', 'rut_jugador'],
+  required: ["id", "nombre_jugador", "rut_jugador"],
 } as const;
 
 const JugadorListResponse = {
-  $id: 'JugadorListResponse',
-  type: 'object',
+  $id: "JugadorListResponse",
+  type: "object",
   properties: {
-    ok: { type: 'boolean' },
-    items: { type: 'array', items: { $ref: 'Jugador#' } },
+    ok: { type: "boolean" },
+    items: { type: "array", items: { $ref: "Jugador#" } },
     ...Pagination.properties,
   },
-  required: ['ok', 'items'],
+  required: ["ok", "items"],
 } as const;
 
 /* ───────────────────────────────────────────────
    🔶 PAGOS JUGADOR
+   ✅ RUT como string
 ─────────────────────────────────────────────── */
 
 const PagoJugador = {
-  $id: 'PagoJugador',
-  type: 'object',
+  $id: "PagoJugador",
+  type: "object",
   properties: {
-    id: { type: 'integer' },
-    jugador_rut: { type: 'integer' },
-    tipo_pago_id: { type: 'integer' },
-    situacion_pago_id: { type: 'integer' },
+    id: { type: "integer" },
 
-    monto: { type: 'number' },
-    fecha_pago: { type: 'string', format: 'date' },
+    jugador_rut: { type: "string" }, // ✅ string
+    tipo_pago_id: { type: "integer" },
+    situacion_pago_id: { type: "integer" },
 
-    medio_pago_id: { type: 'integer' },
+    monto: { type: "number" },
+    fecha_pago: { type: "string", format: "date" },
 
-    comprobante_url: { type: ['string', 'null'] },
-    observaciones: { type: ['string', 'null'] },
+    medio_pago_id: { type: "integer" },
+
+    comprobante_url: { type: ["string", "null"] },
+    observaciones: { type: ["string", "null"] },
   },
   required: [
-    'id',
-    'jugador_rut',
-    'tipo_pago_id',
-    'situacion_pago_id',
-    'monto',
-    'fecha_pago',
-    'medio_pago_id',
+    "id",
+    "jugador_rut",
+    "tipo_pago_id",
+    "situacion_pago_id",
+    "monto",
+    "fecha_pago",
+    "medio_pago_id",
   ],
 } as const;
 
 const PagoJugadorListResponse = {
-  $id: 'PagoJugadorListResponse',
-  type: 'object',
+  $id: "PagoJugadorListResponse",
+  type: "object",
   properties: {
-    ok: { type: 'boolean' },
-    items: { type: 'array', items: { $ref: 'PagoJugador#' } },
+    ok: { type: "boolean" },
+    items: { type: "array", items: { $ref: "PagoJugador#" } },
   },
-  required: ['ok', 'items'],
+  required: ["ok", "items"],
 } as const;
 
 /* ───────────────────────────────────────────────
-   🔶 ESTADÍSTICAS (versión resumida)
+   🔶 ESTADÍSTICAS (dinámico)
 ─────────────────────────────────────────────── */
 
 const Estadistica = {
-  $id: 'Estadistica',
-  type: 'object',
-  additionalProperties: { type: ['integer', 'number', 'string', 'null'] },
-  // NOTA: dejamos las keys dinámicas por compatibilidad
+  $id: "Estadistica",
+  type: "object",
+  additionalProperties: { type: ["integer", "number", "string", "null"] },
 } as const;
 
 const EstadisticaResponse = {
-  $id: 'EstadisticaResponse',
-  type: 'object',
+  $id: "EstadisticaResponse",
+  type: "object",
   properties: {
-    ok: { type: 'boolean' },
-    items: { type: 'array', items: { $ref: 'Estadistica#' } },
+    ok: { type: "boolean" },
+    items: { type: "array", items: { $ref: "Estadistica#" } },
   },
-  required: ['ok'],
+  required: ["ok", "items"],
+} as const;
+
+/* ───────────────────────────────────────────────
+   📰 NOTICIAS + ESTADO_NOTICIAS
+   - Catálogo estado_noticias: id + nombre
+   - Listado NO trae imagen_base64 (liviano)
+   - Detalle SÍ trae imagen_base64
+   ✅ FIX: timestamps SIN format date-time (MySQL puede venir "YYYY-MM-DD HH:mm:ss")
+   ✅ FIX: flags 0/1 o boolean
+   ✅ FIX: bytes / orders int o string según driver
+─────────────────────────────────────────────── */
+
+const EstadoNoticia = {
+  $id: "EstadoNoticia",
+  type: "object",
+  properties: {
+    id: { type: "integer" },
+    nombre: { type: "string" },
+  },
+  required: ["id", "nombre"],
+} as const;
+
+const EstadoNoticiaListResponse = {
+  $id: "EstadoNoticiaListResponse",
+  type: "object",
+  properties: {
+    ok: { type: "boolean" },
+    items: { type: "array", items: { $ref: "EstadoNoticia#" } },
+  },
+  required: ["ok", "items"],
+} as const;
+
+const NoticiaListItem = {
+  $id: "NoticiaListItem",
+  type: "object",
+  properties: {
+    id: { type: "integer" },
+    slug: { type: "string" },
+    titulo: { type: "string" },
+    resumen: { type: ["string", "null"] },
+
+    // ✅ liviano: NO base64
+    imagen_mime: { type: ["string", "null"] },
+    imagen_bytes: { type: ["integer", "string", "null"] },
+
+    estado_noticia_id: { type: "integer" },
+    estado_nombre: { type: "string" },
+
+    // ✅ sin format: date-time (MySQL puede venir con espacio)
+    published_at: { type: ["string", "null"] },
+
+    // ✅ flags pueden venir 0/1 o boolean
+    is_popup: { type: ["integer", "boolean"] },
+    popup_start_at: { type: ["string", "null"] },
+    popup_end_at: { type: ["string", "null"] },
+
+    pinned: { type: ["integer", "boolean"] },
+    pinned_order: { type: ["integer", "string", "null"] },
+
+    // ✅ sin format: date-time
+    created_at: { type: "string" },
+    updated_at: { type: "string" },
+  },
+  required: ["id", "slug", "titulo", "estado_noticia_id", "estado_nombre", "created_at", "updated_at"],
+} as const;
+
+const NoticiaListResponse = {
+  $id: "NoticiaListResponse",
+  type: "object",
+  properties: {
+    ok: { type: "boolean" },
+    items: { type: "array", items: { $ref: "NoticiaListItem#" } },
+    ...Pagination.properties,
+  },
+  required: ["ok", "items"],
+} as const;
+
+const NoticiaDetail = {
+  $id: "NoticiaDetail",
+  type: "object",
+  properties: {
+    id: { type: "integer" },
+    slug: { type: "string" },
+    titulo: { type: "string" },
+    resumen: { type: ["string", "null"] },
+    contenido: { type: ["string", "null"] },
+
+    // ✅ detalle: incluye base64
+    imagen_mime: { type: ["string", "null"] },
+    imagen_base64: { type: ["string", "null"] },
+    imagen_bytes: { type: ["integer", "string", "null"] },
+
+    estado_noticia_id: { type: "integer" },
+    estado_nombre: { type: "string" },
+
+    published_at: { type: ["string", "null"] },
+
+    is_popup: { type: ["integer", "boolean"] },
+    popup_start_at: { type: ["string", "null"] },
+    popup_end_at: { type: ["string", "null"] },
+
+    pinned: { type: ["integer", "boolean"] },
+    pinned_order: { type: ["integer", "string", "null"] },
+
+    created_by_admin_id: { type: ["integer", "null"] },
+
+    created_at: { type: "string" },
+    updated_at: { type: "string" },
+  },
+  required: ["id", "slug", "titulo", "estado_noticia_id", "estado_nombre", "created_at", "updated_at"],
+} as const;
+
+const NoticiaDetailResponse = {
+  $id: "NoticiaDetailResponse",
+  type: "object",
+  properties: {
+    ok: { type: "boolean" },
+    item: { $ref: "NoticiaDetail#" },
+  },
+  required: ["ok", "item"],
 } as const;
 
 /* ───────────────────────────────────────────────
@@ -167,15 +291,32 @@ const EstadisticaResponse = {
 ─────────────────────────────────────────────── */
 
 export async function registerSchemas(app: FastifyInstance) {
+  // Utilidades
+  app.addSchema(OkOnly);
+
+  // Catálogos genéricos
   app.addSchema(CatalogoItem);
   app.addSchema(CatalogoListResponse);
 
+  // Jugadores
   app.addSchema(Jugador);
   app.addSchema(JugadorListResponse);
 
+  // Pagos
   app.addSchema(PagoJugador);
   app.addSchema(PagoJugadorListResponse);
 
+  // Estadísticas
   app.addSchema(Estadistica);
   app.addSchema(EstadisticaResponse);
+
+  // Noticias
+  app.addSchema(EstadoNoticia);
+  app.addSchema(EstadoNoticiaListResponse);
+
+  app.addSchema(NoticiaListItem);
+  app.addSchema(NoticiaListResponse);
+
+  app.addSchema(NoticiaDetail);
+  app.addSchema(NoticiaDetailResponse);
 }

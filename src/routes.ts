@@ -4,6 +4,9 @@ import { FastifyInstance } from 'fastify';
 // Routers
 import auth from './routers/auth';
 import auth_apoderado  from './routers/auth_apoderado';
+import admin_noticias from './routers/admin_noticias';
+import noticias from './routers/noticias';
+import estado_noticias from './routers/estado_noticias';
 import usuarios from './routers/usuarios';
 import roles from './routers/roles';
 import jugadores from './routers/jugadores';
@@ -63,4 +66,9 @@ export async function registerRoutes(app: FastifyInstance) {
   app.register(convocatorias, { prefix: `${API_BASE}/convocatorias` });
   app.register(convocatorias_historico, { prefix: `${API_BASE}/convocatorias-historico`,
   });
+
+  // Noticias y administración de noticias
+  app.register(noticias, { prefix: `${API_BASE}/noticias` });
+  app.register(admin_noticias, { prefix: `${API_BASE}/admin-noticias` });
+  app.register(estado_noticias, { prefix: `${API_BASE}/estado-noticias` });
 }
