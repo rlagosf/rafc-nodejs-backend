@@ -5,7 +5,6 @@ import { FastifyInstance } from "fastify";
    🔷 UTILIDADES BASE: Reutilizables en toda la API
 ─────────────────────────────────────────────── */
 
-// Estándar: listados paginados usan total (no count)
 const Pagination = {
   type: "object",
   properties: {
@@ -23,7 +22,7 @@ const OkOnly = {
 } as const;
 
 /* ───────────────────────────────────────────────
-   🔶 CATÁLOGOS (id + nombre)  ✅ (sin count/total)
+   🔶 CATÁLOGOS (id + nombre)  ✅
 ─────────────────────────────────────────────── */
 
 const CatalogoItem = {
@@ -48,7 +47,6 @@ const CatalogoListResponse = {
 
 /* ───────────────────────────────────────────────
    🔶 JUGADORES
-   ✅ RUT como string (consistente con auth)
 ─────────────────────────────────────────────── */
 
 const Jugador = {
@@ -57,7 +55,7 @@ const Jugador = {
   properties: {
     id: { type: "integer" },
 
-    rut_jugador: { type: "string" }, // ✅ string
+    rut_jugador: { type: "string" },
     nombre_jugador: { type: "string" },
 
     edad: { type: ["integer", "null"] },
@@ -73,7 +71,7 @@ const Jugador = {
     talla_short: { type: ["string", "null"] },
 
     nombre_apoderado: { type: ["string", "null"] },
-    rut_apoderado: { type: ["string", "null"] }, // ✅ string
+    rut_apoderado: { type: ["string", "null"] },
     telefono_apoderado: { type: ["string", "null"] },
 
     posicion_id: { type: ["integer", "null"] },
@@ -104,7 +102,6 @@ const JugadorListResponse = {
 
 /* ───────────────────────────────────────────────
    🔶 PAGOS JUGADOR
-   ✅ RUT como string
 ─────────────────────────────────────────────── */
 
 const PagoJugador = {
@@ -113,7 +110,7 @@ const PagoJugador = {
   properties: {
     id: { type: "integer" },
 
-    jugador_rut: { type: "string" }, // ✅ string
+    jugador_rut: { type: "string" },
     tipo_pago_id: { type: "integer" },
     situacion_pago_id: { type: "integer" },
 
@@ -168,12 +165,6 @@ const EstadisticaResponse = {
 
 /* ───────────────────────────────────────────────
    📰 NOTICIAS + ESTADO_NOTICIAS
-   - Catálogo estado_noticias: id + nombre
-   - Listado NO trae imagen_base64 (liviano)
-   - Detalle SÍ trae imagen_base64
-   ✅ FIX: timestamps SIN format date-time (MySQL puede venir "YYYY-MM-DD HH:mm:ss")
-   ✅ FIX: flags 0/1 o boolean
-   ✅ FIX: bytes / orders int o string según driver
 ─────────────────────────────────────────────── */
 
 const EstadoNoticia = {
@@ -205,17 +196,14 @@ const NoticiaListItem = {
     titulo: { type: "string" },
     resumen: { type: ["string", "null"] },
 
-    // ✅ liviano: NO base64
     imagen_mime: { type: ["string", "null"] },
     imagen_bytes: { type: ["integer", "string", "null"] },
 
     estado_noticia_id: { type: "integer" },
     estado_nombre: { type: "string" },
 
-    // ✅ sin format: date-time (MySQL puede venir con espacio)
     published_at: { type: ["string", "null"] },
 
-    // ✅ flags pueden venir 0/1 o boolean
     is_popup: { type: ["integer", "boolean"] },
     popup_start_at: { type: ["string", "null"] },
     popup_end_at: { type: ["string", "null"] },
@@ -223,7 +211,6 @@ const NoticiaListItem = {
     pinned: { type: ["integer", "boolean"] },
     pinned_order: { type: ["integer", "string", "null"] },
 
-    // ✅ sin format: date-time
     created_at: { type: "string" },
     updated_at: { type: "string" },
   },
@@ -251,7 +238,6 @@ const NoticiaDetail = {
     resumen: { type: ["string", "null"] },
     contenido: { type: ["string", "null"] },
 
-    // ✅ detalle: incluye base64
     imagen_mime: { type: ["string", "null"] },
     imagen_base64: { type: ["string", "null"] },
     imagen_bytes: { type: ["integer", "string", "null"] },
@@ -294,7 +280,7 @@ export async function registerSchemas(app: FastifyInstance) {
   // Utilidades
   app.addSchema(OkOnly);
 
-  // Catálogos genéricos
+  // Catálogos
   app.addSchema(CatalogoItem);
   app.addSchema(CatalogoListResponse);
 

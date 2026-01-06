@@ -57,7 +57,6 @@ async function bootstrap() {
 
   app.addHook("onSend", async (_req, reply, payload) => {
     // Permissions-Policy: bloquea features no usadas
-    // (ajusta fullscreen si lo necesitas; el resto lo dejamos cerrado)
     reply.header(
       "Permissions-Policy",
       "geolocation=(), camera=(), microphone=(), payment=(), usb=(), fullscreen=(self)"
@@ -69,7 +68,6 @@ async function bootstrap() {
 
     return payload;
   });
-
 
   /* ───────── Home / Health ───────── */
   const HTML_CT = 'text/html; charset=UTF-8';
@@ -174,7 +172,7 @@ async function bootstrap() {
     /^\/auth\/login(?:\/.*)?$/i,
     /^\/api\/auth\/login(?:\/.*)?$/i,
 
-    // ✅ LOGIN APODERADOS (NUEVO)
+    // ✅ LOGIN APODERADOS
     /^\/auth-apoderado\/login(?:\/.*)?$/i,
     /^\/api\/auth-apoderado\/login(?:\/.*)?$/i,
 
@@ -189,8 +187,14 @@ async function bootstrap() {
     // Estáticos básicos
     /^\/favicon\.ico$/i,
     /^\/robots\.txt$/i,
-  ];
 
+    // ✅ NOTICIAS PÚBLICAS (landing)
+    // Permite: /api/noticias, /api/noticias/123, etc.
+    /^\/api\/noticias(?:\/.*)?$/i,
+
+    // (Opcional) si alguna vez sirves rutas sin /api
+    /^\/noticias(?:\/.*)?$/i,
+  ];
 
   app.addHook('onRequest', async (req, reply) => {
     if (req.method === 'OPTIONS' || req.method === 'HEAD') return;
@@ -223,7 +227,7 @@ async function bootstrap() {
 
       // ✅ Soporte admin/staff (token con { sub, rol_id, nombre_usuario })
       (req as any).user = {
-        type: "admin", // o "staff" si lo modelas luego
+        type: "admin",
         id: payload.sub,
         rol_id: payload.rol_id,
         nombre_usuario: payload.nombre_usuario,

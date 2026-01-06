@@ -32,7 +32,6 @@ const BoolLike = z.preprocess((v) => {
 const EstadoId = z.coerce.number().int().positive();
 
 const ListQuerySchema = z.object({
-  // modo: "panel" (default) o "landing"
   mode: z.enum(["panel", "landing"]).optional(),
 
   q: z.string().optional(),
@@ -71,7 +70,6 @@ function trimOrNull(v?: string | null) {
   return s ? s : null;
 }
 
-// Normaliza popup/pinned a 0/1 y fechas a MySQL
 function normalizePopup(p: { is_popup?: any; popup_start_at?: any; popup_end_at?: any }) {
   const is_popup = !!p.is_popup;
   if (!is_popup) return { is_popup: 0, popup_start_at: null, popup_end_at: null };
@@ -82,6 +80,7 @@ function normalizePopup(p: { is_popup?: any; popup_start_at?: any; popup_end_at?
     popup_end_at: trimOrNull(p.popup_end_at) ? toMysqlDatetime(String(p.popup_end_at)) : null,
   };
 }
+
 function normalizePinned(p: { pinned?: any; pinned_order?: any }) {
   const pinned = !!p.pinned;
   if (!pinned) return { pinned: 0, pinned_order: null };
@@ -126,6 +125,11 @@ const CreateSchema = BaseSchema.extend({
 
 const UpdateSchema = BaseSchema.partial().extend({
   published_at: DateTimeLike.nullable().optional(),
+
+  // ✅ permitir actualizar/borrar imagen
+  imagen_mime: z.string().max(40).nullable().optional(),
+  imagen_base64: z.string().nullable().optional(),
+  imagen_bytes: z.coerce.number().int().nonnegative().nullable().optional(),
 });
 
 export default async function admin_noticias(app: FastifyInstance, _opts: FastifyPluginOptions) {
@@ -141,7 +145,6 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
     const { mode, q, estado_noticia_id, include_archived, limit, offset } = parsed.data;
     const db = getDb();
 
-    // fallback archivada = id 3 (si tu catálogo la respeta)
     const archivadaId =
       (await getEstadoIdByName(db, "Archivada")) ??
       (await getEstadoIdByName(db, "Archivado")) ??
@@ -154,13 +157,11 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
 
     // ===== LANDING MODE =====
     if (mode === "landing") {
-      // Para landing: SOLO publicadas (por nombre del catálogo)
       const publicadaId =
         (await getEstadoIdByName(db, "Publicada")) ??
         (await getEstadoIdByName(db, "Publicado")) ??
-        2; // fallback típico
+        2;
 
-      // 1) popup activo
       const [popupRows] = (await db.query(
         `
         SELECT
@@ -180,7 +181,6 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
         [publicadaId]
       )) as any;
 
-      // 2) cards (6) publicadas, pinned primero
       const [cardRows] = (await db.query(
         `
         SELECT
@@ -211,7 +211,6 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
     const where: string[] = [];
     const params: any[] = [];
 
-    // Por defecto, ocultar archivadas
     if (!include_archived && estado_noticia_id === undefined) {
       where.push("n.estado_noticia_id <> ?");
       params.push(archivadaId);
@@ -265,14 +264,13 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
       total: Number(countRow?.total ?? 0),
       limit,
       offset,
-      archivada_id: archivadaId, // útil para el frontend
+      archivada_id: archivadaId,
     });
   });
 
   /**
    * ✅ GET /api/admin-noticias/:id
    * - Devuelve detalle (incluye base64)
-   * - Público si quieres (pero normalmente solo lo usa admin)
    */
   app.get("/:id", async (req, reply) => {
     const parsed = IdSchema.safeParse(req.params);
@@ -318,7 +316,13 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
       return reply.code(400).send({ ok: false, message: "POPUP_START_REQUIRED" });
     }
 
-    // published_at automático si estado es "Publicada"
+    // ✅ coherencia de imagen en CREATE (si viene base64, exigir mime/bytes)
+    if (d.imagen_base64) {
+      if (!d.imagen_mime || d.imagen_bytes == null) {
+        return reply.code(400).send({ ok: false, message: "IMAGE_FIELDS_INCOMPLETE" });
+      }
+    }
+
     const publicadaId =
       (await getEstadoIdByName(db, "Publicada")) ??
       (await getEstadoIdByName(db, "Publicado")) ??
@@ -378,6 +382,8 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
 
   /**
    * ✅ PATCH /api/admin-noticias/:id (ADMIN)
+   * - FIX: ahora actualiza/borrar imagen correctamente
+   * - FIX: no apaga popup/pinned si no viene el flag
    */
   app.patch("/:id", async (req, reply) => {
     await requireAdmin(req, reply);
@@ -391,6 +397,23 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
     const id = idParsed.data.id;
     const d = bodyParsed.data;
     const db = getDb();
+
+    // ✅ leer estado actual para evitar “autodesactivaciones” de popup/pinned
+    const [[current]] = (await db.query(
+      `
+      SELECT
+        is_popup, popup_start_at, popup_end_at,
+        pinned, pinned_order,
+        imagen_mime, imagen_base64, imagen_bytes,
+        published_at
+      FROM noticias
+      WHERE id = ?
+      LIMIT 1
+      `,
+      [id]
+    )) as any;
+
+    if (!current) return reply.code(404).send({ ok: false, message: "NOT_FOUND" });
 
     if (d.estado_noticia_id !== undefined) {
       const okEstado = await ensureEstadoExists(db, d.estado_noticia_id);
@@ -410,11 +433,12 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
     if (d.resumen !== undefined) add("resumen", d.resumen ?? null);
     if (d.contenido !== undefined) add("contenido", d.contenido ?? null);
 
+    // ✅ Popup: usa current si no viene el flag, pero sí vienen fechas
     if (d.is_popup !== undefined || d.popup_start_at !== undefined || d.popup_end_at !== undefined) {
       const popup = normalizePopup({
-        is_popup: d.is_popup ?? false,
-        popup_start_at: d.popup_start_at ?? null,
-        popup_end_at: d.popup_end_at ?? null,
+        is_popup: d.is_popup !== undefined ? d.is_popup : current.is_popup,
+        popup_start_at: d.popup_start_at !== undefined ? d.popup_start_at : current.popup_start_at,
+        popup_end_at: d.popup_end_at !== undefined ? d.popup_end_at : current.popup_end_at,
       });
 
       if (popup.is_popup === 1 && !popup.popup_start_at) {
@@ -426,16 +450,44 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
       add("popup_end_at", popup.popup_end_at);
     }
 
+    // ✅ Pinned: usa current si no viene pinned, pero sí viene pinned_order
     if (d.pinned !== undefined || d.pinned_order !== undefined) {
       const pin = normalizePinned({
-        pinned: d.pinned ?? false,
-        pinned_order: d.pinned_order ?? null,
+        pinned: d.pinned !== undefined ? d.pinned : current.pinned,
+        pinned_order: d.pinned_order !== undefined ? d.pinned_order : current.pinned_order,
       });
+
       add("pinned", pin.pinned);
       add("pinned_order", pin.pinned_order);
     }
 
-    // published_at: si pasa a publicada, setea NOW si estaba null
+    // ✅ Imagen: diferenciar "no vino" vs "vino null"
+    const hasImgMime = Object.prototype.hasOwnProperty.call(d, "imagen_mime");
+    const hasImgB64 = Object.prototype.hasOwnProperty.call(d, "imagen_base64");
+    const hasImgBytes = Object.prototype.hasOwnProperty.call(d, "imagen_bytes");
+
+    // coherencia: si manda base64 no-null => exigir mime y bytes
+    if (hasImgB64 && d.imagen_base64) {
+      const mime = hasImgMime ? d.imagen_mime : current.imagen_mime;
+      const bytes = hasImgBytes ? d.imagen_bytes : current.imagen_bytes;
+      if (!mime || bytes == null) {
+        return reply.code(400).send({ ok: false, message: "IMAGE_FIELDS_INCOMPLETE" });
+      }
+    }
+
+    // si viene imagen_base64 explícitamente null => borrar todo
+    if (hasImgB64 && d.imagen_base64 == null) {
+      add("imagen_base64", null);
+      add("imagen_mime", null);
+      add("imagen_bytes", null);
+    } else {
+      // si vienen campos individualmente, los aplicamos tal cual (incluye null)
+      if (hasImgMime) add("imagen_mime", d.imagen_mime ?? null);
+      if (hasImgB64) add("imagen_base64", d.imagen_base64 ?? null);
+      if (hasImgBytes) add("imagen_bytes", d.imagen_bytes ?? null);
+    }
+
+    // ✅ published_at + estado
     if (d.estado_noticia_id !== undefined) {
       add("estado_noticia_id", d.estado_noticia_id);
 

@@ -1,11 +1,11 @@
 // src/routes.ts
 import { FastifyInstance } from 'fastify';
+import { noticiasPublicRoutes } from "./routers/noticias_public";
 
 // Routers
 import auth from './routers/auth';
-import auth_apoderado  from './routers/auth_apoderado';
+import auth_apoderado from './routers/auth_apoderado';
 import admin_noticias from './routers/admin_noticias';
-import noticias from './routers/noticias';
 import estado_noticias from './routers/estado_noticias';
 import usuarios from './routers/usuarios';
 import roles from './routers/roles';
@@ -35,7 +35,7 @@ export async function registerRoutes(app: FastifyInstance) {
 
   // Core
   app.register(auth, { prefix: `${API_BASE}/auth` });
-  app.register(auth_apoderado, {prefix: `${API_BASE}/auth-apoderado`})
+  app.register(auth_apoderado, { prefix: `${API_BASE}/auth-apoderado` })
   app.register(portal_apoderado, { prefix: `${API_BASE}/portal-apoderado` });
   app.register(usuarios, { prefix: `${API_BASE}/usuarios` });
   app.register(roles, { prefix: `${API_BASE}/roles` });
@@ -64,11 +64,17 @@ export async function registerRoutes(app: FastifyInstance) {
   // Estadísticas y convocatorias
   app.register(estadisticas, { prefix: `${API_BASE}/estadisticas` });
   app.register(convocatorias, { prefix: `${API_BASE}/convocatorias` });
-  app.register(convocatorias_historico, { prefix: `${API_BASE}/convocatorias-historico`,
+  app.register(convocatorias_historico, {
+    prefix: `${API_BASE}/convocatorias-historico`,
   });
 
   // Noticias y administración de noticias
-  app.register(noticias, { prefix: `${API_BASE}/noticias` });
+
+  // Noticias públicas (landing)
+  app.register(noticiasPublicRoutes, { prefix: `${API_BASE}/noticias` });
+
+  // Noticias y administración de noticias
   app.register(admin_noticias, { prefix: `${API_BASE}/admin-noticias` });
   app.register(estado_noticias, { prefix: `${API_BASE}/estado-noticias` });
+
 }
