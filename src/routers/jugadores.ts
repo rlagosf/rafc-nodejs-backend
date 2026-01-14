@@ -2,36 +2,63 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
 import { db } from "../db";
+import { ensureApoderadoAuth } from "../scripts/hash_apoderado";
 
 /**
  * ───────────────────────────────
- * Helpers FOTO (validación liviana)
+ * Helpers FOTO / PDF (validación liviana)
  * ───────────────────────────────
  */
 function isValidMime(m?: string) {
   return ["image/jpeg", "image/jpg", "image/png", "image/webp"].includes(
-    String(m || "").toLowerCase()
+    String(m || "").toLowerCase().trim()
   );
 }
 
-function approxBytesFromBase64(b64: string) {
-  const s = b64.replace(/\s+/g, "");
-  const padding = s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0;
-  return Math.floor((s.length * 3) / 4) - padding;
-}
-
-function looksLikeBase64(b64: string) {
-  const s = String(b64 || "").trim();
-  if (!s) return false;
-  return /^[A-Za-z0-9+/]+={0,2}$/.test(s);
+function isValidPdfMime(m?: string) {
+  const mm = String(m || "").toLowerCase().trim();
+  return mm === "application/pdf";
 }
 
 function cleanBase64Payload(input: string) {
-  // Si llega "data:image/png;base64,XXXX", lo deja como "XXXX"
+  // Si llega "data:xxx;base64,XXXX", lo deja como "XXXX"
   const s = String(input || "").trim();
   const idx = s.indexOf("base64,");
   if (s.startsWith("data:") && idx !== -1) return s.slice(idx + "base64,".length);
   return s;
+}
+
+function normalizeB64(input: string) {
+  // deja sin espacios/saltos para validar y calcular bytes
+  return String(input || "").replace(/\s+/g, "").trim();
+}
+
+function looksLikeBase64(b64: string) {
+  const s = normalizeB64(b64);
+  if (!s) return false;
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(s);
+}
+
+function approxBytesFromBase64(b64: string) {
+  const s = normalizeB64(b64);
+  const padding = s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0;
+  return Math.floor((s.length * 3) / 4) - padding;
+}
+
+/**
+ * ───────────────────────────────
+ * Helpers DB: obtener conexión transaccional segura
+ * ───────────────────────────────
+ */
+async function getConn() {
+  // mysql2/promise pool suele exponer getConnection
+  const anyDb: any = db as any;
+  if (typeof anyDb.getConnection === "function") {
+    const conn = await anyDb.getConnection();
+    return { conn, release: () => conn.release?.() };
+  }
+  // fallback: si tu "db" ya es una conexión
+  return { conn: anyDb, release: () => {} };
 }
 
 /**
@@ -81,36 +108,70 @@ const BaseFields = {
 
   observaciones: z.string().trim().optional(),
   fecha_nacimiento: z.union([z.string(), z.date()]).optional(),
+
+  // ⚠️ Base (Update): puede venir o no; pero en Create la forzamos obligatoria
   sucursal_id: z.union([z.number().int(), z.string().regex(/^\d+$/)]).nullable().optional(),
 
   // ✅ FOTO
-  foto_base64: z.string().trim().nullable().optional(), // base64 puro (o dataURL, lo limpiamos)
-  foto_mime: z.string().trim().nullable().optional(),   // image/jpeg, image/png, ...
+  foto_base64: z.string().trim().nullable().optional(),
+  foto_mime: z.string().trim().nullable().optional(),
+
+  // ✅ CONTRATO (PDF base64)
+  contrato_prestacion: z.string().trim().nullable().optional(),
+  contrato_prestacion_mime: z.string().trim().nullable().optional(),
+  contrato_prestacion_updated_at: z.union([z.string(), z.date()]).nullable().optional(),
 };
 
+// ✅ CREATE: sucursal_id OBLIGATORIA y NO nullable
 const CreateSchema = z
   .object({
     ...BaseFields,
     nombre_jugador: z.string().trim().min(1),
     rut_jugador: z.union([z.string().regex(/^\d{7,8}$/), z.number().int().min(1)]),
+
+    // 👇 aquí está la magia
+    sucursal_id: z.union([z.number().int(), z.string().regex(/^\d+$/)]),
   })
   .strict();
 
 const UpdateSchema = z.object({ ...BaseFields }).strict();
 
 /**
- * ✅ IMPORTANTÍSIMO:
- * faltaban foto_base64 y foto_mime
+ * allowedKeys: todo lo que aceptas desde el cliente
  */
 const allowedKeys = new Set([
-  'nombre_jugador', 'rut_jugador', 'email', 'telefono', 'edad', 'peso', 'estatura',
-  'talla_polera', 'talla_short', 'nombre_apoderado', 'rut_apoderado', 'telefono_apoderado',
-  'posicion_id', 'categoria_id', 'establec_educ_id', 'prevision_medica_id', 'estado_id',
-  'direccion', 'comuna_id', 'observaciones', 'fecha_nacimiento', 'sucursal_id',
-  // ✅ FOTO
-  'foto_base64', 'foto_mime',
-]);
+  "nombre_jugador",
+  "rut_jugador",
+  "email",
+  "telefono",
+  "edad",
+  "peso",
+  "estatura",
+  "talla_polera",
+  "talla_short",
+  "nombre_apoderado",
+  "rut_apoderado",
+  "telefono_apoderado",
+  "posicion_id",
+  "categoria_id",
+  "establec_educ_id",
+  "prevision_medica_id",
+  "estado_id",
+  "direccion",
+  "comuna_id",
+  "observaciones",
+  "fecha_nacimiento",
+  "sucursal_id",
 
+  // ✅ FOTO
+  "foto_base64",
+  "foto_mime",
+
+  // ✅ CONTRATO
+  "contrato_prestacion",
+  "contrato_prestacion_mime",
+  "contrato_prestacion_updated_at",
+]);
 
 function pickAllowed(body: Record<string, any>) {
   const out: Record<string, any> = {};
@@ -124,9 +185,16 @@ function coerceForDB(row: Record<string, any>) {
   const out: Record<string, any> = { ...row };
 
   const asInt = [
-    "edad", "posicion_id", "categoria_id", "establec_educ_id",
-    "prevision_medica_id", "estado_id", "rut_jugador", "rut_apoderado",
-    "sucursal_id", "comuna_id",
+    "edad",
+    "posicion_id",
+    "categoria_id",
+    "establec_educ_id",
+    "prevision_medica_id",
+    "estado_id",
+    "rut_jugador",
+    "rut_apoderado",
+    "sucursal_id",
+    "comuna_id",
   ];
 
   for (const k of asInt) {
@@ -144,6 +212,7 @@ function coerceForDB(row: Record<string, any>) {
     }
   }
 
+  // fecha_nacimiento -> yyyy-mm-dd
   if (typeof out.fecha_nacimiento === "string" || out.fecha_nacimiento instanceof Date) {
     const d = new Date(out.fecha_nacimiento);
     if (!Number.isNaN(d.getTime())) {
@@ -151,7 +220,10 @@ function coerceForDB(row: Record<string, any>) {
       const m = String(d.getUTCMonth() + 1).padStart(2, "0");
       const da = String(d.getUTCDate()).padStart(2, "0");
       out.fecha_nacimiento = `${y}-${m}-${da}`;
-    } else if (typeof out.fecha_nacimiento === "string" && /^\d{4}-\d{2}-\d{2}$/.test(out.fecha_nacimiento)) {
+    } else if (
+      typeof out.fecha_nacimiento === "string" &&
+      /^\d{4}-\d{2}-\d{2}$/.test(out.fecha_nacimiento)
+    ) {
       // ok
     } else {
       delete out.fecha_nacimiento;
@@ -160,21 +232,35 @@ function coerceForDB(row: Record<string, any>) {
 
   if (typeof out.email === "string") out.email = out.email.trim().toLowerCase();
 
-  // ✅ normaliza vacíos
+  // normaliza vacíos
   for (const k of Object.keys(out)) {
     if (out[k] === "") out[k] = null;
   }
 
-  // ✅ limpia dataURL si viene así
-  if (typeof out.foto_base64 === "string") {
-    out.foto_base64 = cleanBase64Payload(out.foto_base64);
+  // limpia dataURL si viene así (FOTO / CONTRATO)
+  if (typeof out.foto_base64 === "string") out.foto_base64 = cleanBase64Payload(out.foto_base64);
+  if (typeof out.contrato_prestacion === "string") out.contrato_prestacion = cleanBase64Payload(out.contrato_prestacion);
+
+  // contrato_prestacion_updated_at normalización
+  if (
+    typeof out.contrato_prestacion_updated_at === "string" ||
+    out.contrato_prestacion_updated_at instanceof Date
+  ) {
+    const d = new Date(out.contrato_prestacion_updated_at);
+    if (!Number.isNaN(d.getTime())) out.contrato_prestacion_updated_at = d;
+    else delete out.contrato_prestacion_updated_at;
   }
 
   delete (out as any).estadistica_id;
   return out;
 }
 
-function normalizeOut(row: any) {
+/**
+ * Normalizadores:
+ * - list: no incluye base64 pesado (foto_base64 / contrato_prestacion)
+ * - detail: incluye base64
+ */
+function normalizeListOut(row: any) {
   if (!row) return null;
   return {
     id: Number(row.id),
@@ -202,11 +288,133 @@ function normalizeOut(row: any) {
     estadistica_id: row.estadistica_id != null ? Number(row.estadistica_id) : null,
     sucursal_id: row.sucursal_id != null ? Number(row.sucursal_id) : null,
 
-    // ✅ FOTO
-    foto_base64: row.foto_base64 ?? null,
+    // Metadata
     foto_mime: row.foto_mime ?? null,
     foto_updated_at: row.foto_updated_at ?? null,
+
+    contrato_prestacion_mime: row.contrato_prestacion_mime ?? null,
+    contrato_prestacion_updated_at: row.contrato_prestacion_updated_at ?? null,
   };
+}
+
+function normalizeDetailOut(row: any) {
+  if (!row) return null;
+  const base = normalizeListOut(row);
+  return {
+    ...base,
+    foto_base64: row.foto_base64 ?? null,
+    contrato_prestacion: row.contrato_prestacion ?? null,
+  };
+}
+
+/**
+ * Valida y prepara FOTO para DB (setea updated_at)
+ */
+function applyFotoRules(target: Record<string, any>) {
+  const hasAny = target.foto_base64 != null || target.foto_mime != null;
+  if (!hasAny) return;
+
+  const b64Raw = target.foto_base64;
+  const mimeRaw = target.foto_mime;
+
+  const wantsClear =
+    (b64Raw === null || b64Raw === undefined || b64Raw === "") &&
+    (mimeRaw === null || mimeRaw === undefined || mimeRaw === "");
+
+  if (wantsClear) {
+    target.foto_base64 = null;
+    target.foto_mime = null;
+    (target as any).foto_updated_at = new Date();
+    return;
+  }
+
+  const b64 = normalizeB64(cleanBase64Payload(String(b64Raw || "")));
+  const mime = String(mimeRaw || "").toLowerCase().trim();
+
+  if (!mime || !isValidMime(mime)) throw Object.assign(new Error("foto_mime inválido"), { statusCode: 400 });
+  if (!b64 || !looksLikeBase64(b64)) throw Object.assign(new Error("foto_base64 inválido"), { statusCode: 400 });
+
+  const bytes = approxBytesFromBase64(b64);
+  const MAX_BYTES = 350 * 1024;
+  if (bytes > MAX_BYTES) throw Object.assign(new Error(`Foto excede el máximo (${MAX_BYTES} bytes)`), { statusCode: 413 });
+
+  target.foto_base64 = b64;
+  target.foto_mime = mime;
+  (target as any).foto_updated_at = new Date();
+}
+
+/**
+ * Valida y prepara CONTRATO PDF para DB (setea updated_at)
+ * Nota: si NO tienes la columna contrato_prestacion_updated_at en la DB, este campo causará 1054.
+ */
+function applyContratoRules(target: Record<string, any>) {
+  const hasAny = target.contrato_prestacion != null || target.contrato_prestacion_mime != null;
+  if (!hasAny) return;
+
+  const b64Raw = target.contrato_prestacion;
+  const mimeRaw = target.contrato_prestacion_mime;
+
+  const wantsClear =
+    (b64Raw === null || b64Raw === undefined || b64Raw === "") &&
+    (mimeRaw === null || mimeRaw === undefined || mimeRaw === "");
+
+  if (wantsClear) {
+    target.contrato_prestacion = null;
+    target.contrato_prestacion_mime = null;
+    (target as any).contrato_prestacion_updated_at = new Date();
+    return;
+  }
+
+  const b64 = normalizeB64(cleanBase64Payload(String(b64Raw || "")));
+  const mime = String(mimeRaw || "application/pdf").toLowerCase().trim();
+
+  if (!isValidPdfMime(mime)) throw Object.assign(new Error("contrato_prestacion_mime inválido (application/pdf)"), { statusCode: 400 });
+  if (!b64 || !looksLikeBase64(b64)) throw Object.assign(new Error("contrato_prestacion inválido (base64)"), { statusCode: 400 });
+
+  const bytes = approxBytesFromBase64(b64);
+  const MAX_PDF_BYTES = 3 * 1024 * 1024;
+  if (bytes > MAX_PDF_BYTES) throw Object.assign(new Error(`Contrato excede el máximo (${MAX_PDF_BYTES} bytes)`), { statusCode: 413 });
+
+  target.contrato_prestacion = b64;
+  target.contrato_prestacion_mime = "application/pdf";
+  (target as any).contrato_prestacion_updated_at = new Date();
+}
+
+/**
+ * Si viene rut_apoderado (y es válido para auth), asegura credencial en apoderados_auth.
+ * Política: si el rut_apoderado no cumple el estándar de auth (8 dígitos sin DV), respondemos 400.
+ */
+async function ensureAuthIfRutApoderadoPresent(rut_apoderado: any) {
+  if (rut_apoderado === null || rut_apoderado === undefined || rut_apoderado === "") return;
+
+  const ensured = await ensureApoderadoAuth({ rut_apoderado: String(rut_apoderado) });
+  if (!ensured.ok) {
+    throw Object.assign(new Error(ensured.message || "RUT_APODERADO_INVALID"), { statusCode: 400 });
+  }
+}
+
+async function validateForeignKeys(conn: any, data: Record<string, any>) {
+  const fkChecks: Array<{ field: string; sql: string; val: any }> = [
+    { field: "posicion_id", sql: "SELECT 1 FROM posiciones WHERE id = ? LIMIT 1", val: data.posicion_id },
+    { field: "categoria_id", sql: "SELECT 1 FROM categorias WHERE id = ? LIMIT 1", val: data.categoria_id },
+    { field: "estado_id", sql: "SELECT 1 FROM estado WHERE id = ? LIMIT 1", val: data.estado_id },
+    { field: "establec_educ_id", sql: "SELECT 1 FROM establec_educ WHERE id = ? LIMIT 1", val: data.establec_educ_id },
+    { field: "prevision_medica_id", sql: "SELECT 1 FROM prevision_medica WHERE id = ? LIMIT 1", val: data.prevision_medica_id },
+    { field: "sucursal_id", sql: "SELECT 1 FROM sucursales_real WHERE id = ? LIMIT 1", val: data.sucursal_id },
+    { field: "comuna_id", sql: "SELECT 1 FROM comunas WHERE id = ? LIMIT 1", val: data.comuna_id },
+  ];
+
+  for (const fk of fkChecks) {
+    if (fk.val != null) {
+      const [r]: any = await conn.query(fk.sql, [fk.val]);
+      if (!Array.isArray(r) || r.length === 0) {
+        throw Object.assign(new Error(`Violación de clave foránea: ${fk.field} no existe`), {
+          statusCode: 409,
+          field: fk.field,
+        });
+      }
+    }
+  }
 }
 
 export default async function jugadores(app: FastifyInstance) {
@@ -230,7 +438,8 @@ export default async function jugadores(app: FastifyInstance) {
         "posicion_id, categoria_id, establec_educ_id, prevision_medica_id, estado_id, " +
         "direccion, comuna_id, " +
         "observaciones, fecha_nacimiento, estadistica_id, sucursal_id, " +
-        "foto_mime, foto_updated_at " + // ✅ NO mando foto_base64 en listado (optimiza)
+        "foto_mime, foto_updated_at, " +
+        "contrato_prestacion_mime, contrato_prestacion_updated_at " +
         "FROM jugadores";
 
       const args: any[] = [];
@@ -257,7 +466,7 @@ export default async function jugadores(app: FastifyInstance) {
 
       reply.send({
         ok: true,
-        items: (rows || []).map(normalizeOut),
+        items: (rows || []).map(normalizeListOut),
         limit,
         offset,
         count: rows?.length ?? 0,
@@ -279,7 +488,8 @@ export default async function jugadores(app: FastifyInstance) {
         "posicion_id, categoria_id, establec_educ_id, prevision_medica_id, estado_id, " +
         "direccion, comuna_id, " +
         "observaciones, fecha_nacimiento, estadistica_id, sucursal_id, " +
-        "foto_mime, foto_updated_at " + // ✅
+        "foto_mime, foto_updated_at, " +
+        "contrato_prestacion_mime, contrato_prestacion_updated_at " +
         "FROM jugadores";
 
       const args: any[] = [];
@@ -302,7 +512,7 @@ export default async function jugadores(app: FastifyInstance) {
 
       const [rows]: any = await db.query(sql, args);
 
-      reply.send({ ok: true, items: (rows || []).map(normalizeOut), limit, offset, count: rows?.length ?? 0 });
+      reply.send({ ok: true, items: (rows || []).map(normalizeListOut), limit, offset, count: rows?.length ?? 0 });
     } catch (err: any) {
       reply.code(500).send({ ok: false, message: "Error al listar jugadores activos", detail: err?.message });
     }
@@ -320,15 +530,17 @@ export default async function jugadores(app: FastifyInstance) {
         "SELECT id, rut_jugador, nombre_jugador, edad, email, telefono, peso, estatura, " +
           "talla_polera, talla_short, nombre_apoderado, rut_apoderado, telefono_apoderado, " +
           "posicion_id, categoria_id, establec_educ_id, prevision_medica_id, estado_id, " +
+          "direccion, comuna_id, " +
           "observaciones, fecha_nacimiento, estadistica_id, sucursal_id, " +
-          "foto_base64, foto_mime, foto_updated_at " + // ✅ aquí sí mando base64 (perfil)
+          "foto_base64, foto_mime, foto_updated_at, " +
+          "contrato_prestacion, contrato_prestacion_mime, contrato_prestacion_updated_at " +
           "FROM jugadores WHERE rut_jugador = ? LIMIT 1",
         [rut]
       );
 
       if (!rows || rows.length === 0) return reply.code(404).send({ ok: false, message: "No encontrado" });
 
-      reply.send({ ok: true, item: normalizeOut(rows[0]) });
+      reply.send({ ok: true, item: normalizeDetailOut(rows[0]) });
     } catch (err: any) {
       reply.code(500).send({ ok: false, message: "Error al buscar por RUT", detail: err?.message });
     }
@@ -346,15 +558,17 @@ export default async function jugadores(app: FastifyInstance) {
         "SELECT id, rut_jugador, nombre_jugador, edad, email, telefono, peso, estatura, " +
           "talla_polera, talla_short, nombre_apoderado, rut_apoderado, telefono_apoderado, " +
           "posicion_id, categoria_id, establec_educ_id, prevision_medica_id, estado_id, " +
+          "direccion, comuna_id, " +
           "observaciones, fecha_nacimiento, estadistica_id, sucursal_id, " +
-          "foto_base64, foto_mime, foto_updated_at " + // ✅
+          "foto_base64, foto_mime, foto_updated_at, " +
+          "contrato_prestacion, contrato_prestacion_mime, contrato_prestacion_updated_at " +
           "FROM jugadores WHERE id = ? LIMIT 1",
         [id]
       );
 
       if (!rows || rows.length === 0) return reply.code(404).send({ ok: false, message: "No encontrado" });
 
-      reply.send({ ok: true, item: normalizeOut(rows[0]) });
+      reply.send({ ok: true, item: normalizeDetailOut(rows[0]) });
     } catch (err: any) {
       reply.code(500).send({ ok: false, message: "Error al obtener jugador", detail: err?.message });
     }
@@ -363,44 +577,30 @@ export default async function jugadores(app: FastifyInstance) {
   // ───────── Crear ─────────
   app.post("/", async (req: FastifyRequest, reply: FastifyReply) => {
     let conn: any = null;
-    let mustRelease = false;
+    let release: () => void = () => {};
 
     try {
       const parsed = CreateSchema.parse(req.body);
       const data = coerceForDB(pickAllowed(parsed));
 
-      // ✅ Validación foto en creación (opcional, pero consistente)
-      if (data.foto_base64 || data.foto_mime) {
-        const b64 = cleanBase64Payload(String(data.foto_base64 || ""));
-        const mime = String(data.foto_mime || "").toLowerCase();
-
-        if (!mime || !isValidMime(mime)) {
-          return reply.code(400).send({ ok: false, message: "foto_mime inválido" });
-        }
-        if (!b64 || !looksLikeBase64(b64)) {
-          return reply.code(400).send({ ok: false, message: "foto_base64 inválido" });
-        }
-
-        const bytes = approxBytesFromBase64(b64);
-        const MAX_BYTES = 350 * 1024; // 350 KB (ajústalo)
-        if (bytes > MAX_BYTES) {
-          return reply.code(413).send({ ok: false, message: `Foto excede el máximo (${MAX_BYTES} bytes)` });
-        }
-
-        data.foto_base64 = b64;
-        data.foto_mime = mime;
-        (data as any).foto_updated_at = new Date();
+      // ✅ Defensa extra (por si alguien intenta colarse igual)
+      if (data.sucursal_id == null) {
+        return reply.code(400).send({ ok: false, field: "sucursal_id", message: "Sucursal es obligatoria." });
       }
 
-      if ((db as any).getConnection) {
-        conn = await (db as any).getConnection();
-        mustRelease = true;
-      } else {
-        conn = db as any;
-      }
+      // Validaciones + normalización payloads
+      if ("foto_base64" in data || "foto_mime" in data) applyFotoRules(data);
+      if ("contrato_prestacion" in data || "contrato_prestacion_mime" in data) applyContratoRules(data);
 
-      // ... (tu lógica actual de duplicados y transacción queda igual)
-      // --- lo mantengo tal cual ---
+      // Asegurar credencial apoderado (si viene)
+      await ensureAuthIfRutApoderadoPresent(data.rut_apoderado);
+
+      // Tomar conexión y transacción
+      const got = await getConn();
+      conn = got.conn;
+      release = got.release;
+
+      // Duplicados
       if (data.rut_jugador != null) {
         const [r]: any = await conn.query("SELECT id FROM jugadores WHERE rut_jugador = ? LIMIT 1", [data.rut_jugador]);
         if (Array.isArray(r) && r.length > 0) {
@@ -415,23 +615,14 @@ export default async function jugadores(app: FastifyInstance) {
         }
       }
 
-      const fkChecks: Array<{ field: string; sql: string; val: any }> = [
-        { field: "posicion_id", sql: "SELECT 1 FROM posiciones WHERE id = ? LIMIT 1", val: data.posicion_id },
-        { field: "categoria_id", sql: "SELECT 1 FROM categorias WHERE id = ? LIMIT 1", val: data.categoria_id },
-        { field: "estado_id", sql: "SELECT 1 FROM estado WHERE id = ? LIMIT 1", val: data.estado_id },
-        { field: "establec_educ_id", sql: "SELECT 1 FROM establec_educ WHERE id = ? LIMIT 1", val: data.establec_educ_id },
-        { field: "prevision_medica_id", sql: "SELECT 1 FROM prevision_medica WHERE id = ? LIMIT 1", val: data.prevision_medica_id },
-        { field: "sucursal_id", sql: "SELECT 1 FROM sucursales_real WHERE id = ? LIMIT 1", val: data.sucursal_id },
-        { field: "comuna_id", sql: "SELECT 1 FROM comunas WHERE id = ? LIMIT 1", val: data.comuna_id },
-      ];
-
-      for (const fk of fkChecks) {
-        if (fk.val != null) {
-          const [r]: any = await conn.query(fk.sql, [fk.val]);
-          if (!Array.isArray(r) || r.length === 0) {
-            return reply.code(409).send({ ok: false, field: fk.field, message: `Violación de clave foránea: ${fk.field} no existe` });
-          }
+      // ✅ FK checks (incluye sucursal_id obligatoria ya validada)
+      try {
+        await validateForeignKeys(conn, data);
+      } catch (e: any) {
+        if (e?.statusCode) {
+          return reply.code(e.statusCode).send({ ok: false, field: e.field, message: e.message });
         }
+        throw e;
       }
 
       await conn.beginTransaction();
@@ -452,11 +643,18 @@ export default async function jugadores(app: FastifyInstance) {
       return reply.code(201).send({
         ok: true,
         id: jugadorId,
-        ...normalizeOut({ id: jugadorId, ...data, estadistica_id: jugadorId }),
+        ...normalizeDetailOut({ id: jugadorId, ...data, estadistica_id: jugadorId }),
       });
     } catch (err: any) {
       if (conn) {
-        try { await conn.rollback(); } catch {}
+        try {
+          await conn.rollback();
+        } catch {}
+      }
+
+      // Errores custom de apply*Rules / ensureAuthIfRutApoderadoPresent / validateForeignKeys
+      if (err?.statusCode && typeof err?.message === "string") {
+        return reply.code(err.statusCode).send({ ok: false, field: err?.field, message: err.message });
       }
 
       if (err instanceof ZodError) {
@@ -467,7 +665,12 @@ export default async function jugadores(app: FastifyInstance) {
       if (err?.errno === 1062) {
         const msg = String(err?.sqlMessage || "").toLowerCase();
         const field = msg.includes("rut_jugador") ? "rut_jugador" : msg.includes("email") ? "email" : undefined;
-        return reply.code(409).send({ ok: false, message: field ? `Duplicado: ${field} ya existe` : "Duplicado: clave única violada", field, detail: err?.sqlMessage });
+        return reply.code(409).send({
+          ok: false,
+          message: field ? `Duplicado: ${field} ya existe` : "Duplicado: clave única violada",
+          field,
+          detail: err?.sqlMessage,
+        });
       }
 
       if (err?.errno === 1452) return reply.code(409).send({ ok: false, message: "Violación de clave foránea (revisa ids enviados)", detail: err?.sqlMessage ?? err?.message });
@@ -475,9 +678,9 @@ export default async function jugadores(app: FastifyInstance) {
 
       return reply.code(500).send({ ok: false, message: "Error al crear jugador", detail: err?.sqlMessage ?? err?.message });
     } finally {
-      if (conn && mustRelease && typeof conn.release === "function") {
-        try { conn.release(); } catch {}
-      }
+      try {
+        release();
+      } catch {}
     }
   });
 
@@ -493,60 +696,50 @@ export default async function jugadores(app: FastifyInstance) {
       const changes = coerceForDB(pickAllowed(parsed));
       delete (changes as any).estadistica_id;
 
-      // ✅ Validación foto si viene
-      if ("foto_base64" in changes || "foto_mime" in changes) {
-        const b64Raw = changes.foto_base64;
-        const mimeRaw = changes.foto_mime;
+      // ✅ No permitir vaciar sucursal en PATCH (si quieres permitirlo, me dices y lo cambio)
+      if ("sucursal_id" in changes && (changes.sucursal_id === null || changes.sucursal_id === undefined)) {
+        return reply.code(400).send({ ok: false, field: "sucursal_id", message: "No puedes dejar sucursal en blanco." });
+      }
 
-        // permitir borrar: enviar null en ambos
-        const wantsClear =
-          (b64Raw === null || b64Raw === undefined || b64Raw === "") &&
-          (mimeRaw === null || mimeRaw === undefined || mimeRaw === "");
+      // Validación/normalización condicional
+      if ("foto_base64" in changes || "foto_mime" in changes) applyFotoRules(changes);
+      if ("contrato_prestacion" in changes || "contrato_prestacion_mime" in changes) applyContratoRules(changes);
 
-        if (wantsClear) {
-          changes.foto_base64 = null;
-          changes.foto_mime = null;
-          (changes as any).foto_updated_at = new Date();
-        } else {
-          const b64 = cleanBase64Payload(String(b64Raw || ""));
-          const mime = String(mimeRaw || "").toLowerCase();
-
-          if (!mime || !isValidMime(mime)) {
-            return reply.code(400).send({ ok: false, message: "foto_mime inválido" });
-          }
-          if (!b64 || !looksLikeBase64(b64)) {
-            return reply.code(400).send({ ok: false, message: "foto_base64 inválido" });
-          }
-
-          const bytes = approxBytesFromBase64(b64);
-          const MAX_BYTES = 350 * 1024; // 350 KB (ajústalo)
-          if (bytes > MAX_BYTES) {
-            return reply.code(413).send({ ok: false, message: `Foto excede el máximo (${MAX_BYTES} bytes)` });
-          }
-
-          changes.foto_base64 = b64;
-          changes.foto_mime = mime;
-          (changes as any).foto_updated_at = new Date();
-        }
+      // Si viene rut_apoderado en PATCH: asegurar credencial (si no, no tocamos)
+      if ("rut_apoderado" in changes) {
+        await ensureAuthIfRutApoderadoPresent(changes.rut_apoderado);
       }
 
       if (Object.keys(changes).length === 0) {
         return reply.code(400).send({ ok: false, message: "No hay campos para actualizar" });
       }
 
-      const [result]: any = await db.query("UPDATE jugadores SET ? WHERE id = ?", [changes, id]);
+      // ✅ Validar FKs si vienen ids (evita ids fantasmas)
+      try {
+        await validateForeignKeys(db, changes);
+      } catch (e: any) {
+        if (e?.statusCode) {
+          return reply.code(e.statusCode).send({ ok: false, field: e.field, message: e.message });
+        }
+        throw e;
+      }
 
+      const [result]: any = await db.query("UPDATE jugadores SET ? WHERE id = ?", [changes, id]);
       if (result.affectedRows === 0) return reply.code(404).send({ ok: false, message: "No encontrado" });
 
       reply.send({ ok: true, updated: { id, ...changes } });
     } catch (err: any) {
+      if (err?.statusCode && typeof err?.message === "string") {
+        return reply.code(err.statusCode).send({ ok: false, field: err?.field, message: err.message });
+      }
+
       if (err instanceof ZodError) {
         const detail = err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
         return reply.code(400).send({ ok: false, message: "Payload inválido", detail });
       }
 
       if (err?.errno === 1062) return reply.code(409).send({ ok: false, message: "Duplicado: el RUT (o email) ya existe" });
-      if (err?.errno === 1452) return reply.code(409).send({ ok: false, message: "Violación de clave foránea (sucursal_id inválido)", detail: err?.sqlMessage ?? err?.message });
+      if (err?.errno === 1452) return reply.code(409).send({ ok: false, message: "Violación de clave foránea (revisa ids enviados)", detail: err?.sqlMessage ?? err?.message });
 
       reply.code(500).send({ ok: false, message: "Error al actualizar jugador", detail: err?.message });
     }
@@ -564,59 +757,49 @@ export default async function jugadores(app: FastifyInstance) {
       const changes = coerceForDB(pickAllowed(parsed));
       delete (changes as any).estadistica_id;
 
-      // ✅ Validación foto si viene
-      if ("foto_base64" in changes || "foto_mime" in changes) {
-        const b64Raw = changes.foto_base64;
-        const mimeRaw = changes.foto_mime;
+      // ✅ No permitir vaciar sucursal en PATCH
+      if ("sucursal_id" in changes && (changes.sucursal_id === null || changes.sucursal_id === undefined)) {
+        return reply.code(400).send({ ok: false, field: "sucursal_id", message: "No puedes dejar sucursal en blanco." });
+      }
 
-        const wantsClear =
-          (b64Raw === null || b64Raw === undefined || b64Raw === "") &&
-          (mimeRaw === null || mimeRaw === undefined || mimeRaw === "");
+      if ("foto_base64" in changes || "foto_mime" in changes) applyFotoRules(changes);
+      if ("contrato_prestacion" in changes || "contrato_prestacion_mime" in changes) applyContratoRules(changes);
 
-        if (wantsClear) {
-          changes.foto_base64 = null;
-          changes.foto_mime = null;
-          (changes as any).foto_updated_at = new Date();
-        } else {
-          const b64 = cleanBase64Payload(String(b64Raw || ""));
-          const mime = String(mimeRaw || "").toLowerCase();
-
-          if (!mime || !isValidMime(mime)) {
-            return reply.code(400).send({ ok: false, message: "foto_mime inválido" });
-          }
-          if (!b64 || !looksLikeBase64(b64)) {
-            return reply.code(400).send({ ok: false, message: "foto_base64 inválido" });
-          }
-
-          const bytes = approxBytesFromBase64(b64);
-          const MAX_BYTES = 350 * 1024; // 350 KB
-          if (bytes > MAX_BYTES) {
-            return reply.code(413).send({ ok: false, message: `Foto excede el máximo (${MAX_BYTES} bytes)` });
-          }
-
-          changes.foto_base64 = b64;
-          changes.foto_mime = mime;
-          (changes as any).foto_updated_at = new Date();
-        }
+      // Si viene rut_apoderado en PATCH: asegurar credencial
+      if ("rut_apoderado" in changes) {
+        await ensureAuthIfRutApoderadoPresent(changes.rut_apoderado);
       }
 
       if (Object.keys(changes).length === 0) {
         return reply.code(400).send({ ok: false, message: "No hay campos para actualizar" });
       }
 
-      const [result]: any = await db.query("UPDATE jugadores SET ? WHERE rut_jugador = ?", [changes, rut]);
+      // ✅ Validar FKs si vienen ids
+      try {
+        await validateForeignKeys(db, changes);
+      } catch (e: any) {
+        if (e?.statusCode) {
+          return reply.code(e.statusCode).send({ ok: false, field: e.field, message: e.message });
+        }
+        throw e;
+      }
 
+      const [result]: any = await db.query("UPDATE jugadores SET ? WHERE rut_jugador = ?", [changes, rut]);
       if (result.affectedRows === 0) return reply.code(404).send({ ok: false, message: "No encontrado" });
 
       reply.send({ ok: true, updated: { rut_jugador: rut, ...changes } });
     } catch (err: any) {
+      if (err?.statusCode && typeof err?.message === "string") {
+        return reply.code(err.statusCode).send({ ok: false, field: err?.field, message: err.message });
+      }
+
       if (err instanceof ZodError) {
         const detail = err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
         return reply.code(400).send({ ok: false, message: "Payload inválido", detail });
       }
 
       if (err?.errno === 1062) return reply.code(409).send({ ok: false, message: "Duplicado: el RUT (o email) ya existe" });
-      if (err?.errno === 1452) return reply.code(409).send({ ok: false, message: "Violación de clave foránea (sucursal_id inválido)", detail: err?.sqlMessage ?? err?.message });
+      if (err?.errno === 1452) return reply.code(409).send({ ok: false, message: "Violación de clave foránea (revisa ids enviados)", detail: err?.sqlMessage ?? err?.message });
 
       reply.code(500).send({ ok: false, message: "Error al actualizar jugador por RUT", detail: err?.message });
     }
@@ -635,7 +818,11 @@ export default async function jugadores(app: FastifyInstance) {
       reply.send({ ok: true, deleted: id });
     } catch (err: any) {
       if (err?.errno === 1451) {
-        return reply.code(409).send({ ok: false, message: "No se puede eliminar: hay referencias asociadas.", detail: err?.sqlMessage ?? err?.message });
+        return reply.code(409).send({
+          ok: false,
+          message: "No se puede eliminar: hay referencias asociadas.",
+          detail: err?.sqlMessage ?? err?.message,
+        });
       }
       reply.code(500).send({ ok: false, message: "Error al eliminar jugador", detail: err?.message });
     }

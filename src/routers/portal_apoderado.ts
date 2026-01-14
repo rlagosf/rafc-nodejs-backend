@@ -51,6 +51,19 @@ const safeNum = (v: any) => {
   return Number.isFinite(n) ? n : null;
 };
 
+const hasB64 = (v: any) => {
+  const s = String(v ?? "").trim();
+  return s.length > 50; // umbral razonable
+};
+
+const cleanBase64 = (raw: any) => {
+  const s = String(raw ?? "").trim();
+  return s
+    .replace(/^data:application\/pdf;base64,/, "")
+    .replace(/^data:.*;base64,/, "")
+    .replace(/\s+/g, "");
+};
+
 export default async function portal_apoderado(
   app: FastifyInstance,
   _opts: FastifyPluginOptions
@@ -58,6 +71,7 @@ export default async function portal_apoderado(
   /* ──────────────────────────────────────────────────────────────
      GET /api/portal-apoderado/mis-jugadores
      - Devuelve jugadores asociados al apoderado, con nombres de catálogos
+     - Incluye tiene_contrato (boolean)
   ────────────────────────────────────────────────────────────── */
   app.get("/mis-jugadores", async (req, reply) => {
     const tokenData = verifyApoderadoToken(req.headers.authorization);
@@ -72,7 +86,6 @@ export default async function portal_apoderado(
 
     const db = getDb();
 
-    // ✅ Traemos los nombres por JOIN para que el frontend muestre “bonito”
     const [rows] = await db.query<any[]>(
       `SELECT
           j.rut_jugador,
@@ -80,6 +93,9 @@ export default async function portal_apoderado(
           j.estado_id,
           j.categoria_id,
           j.posicion_id,
+
+          -- bandera liviana (no manda base64)
+          (j.contrato_prestacion IS NOT NULL AND j.contrato_prestacion <> '') AS tiene_contrato,
 
           e.nombre  AS estado_nombre,
           c.nombre  AS categoria_nombre,
@@ -95,7 +111,6 @@ export default async function portal_apoderado(
       [tokenData.rut]
     );
 
-    // Normalizamos un poquito para que sea consistente con el resumen
     const jugadores = (rows || []).map((r) => ({
       rut_jugador: r.rut_jugador,
       nombre_jugador: r.nombre_jugador,
@@ -103,6 +118,8 @@ export default async function portal_apoderado(
       estado_id: r.estado_id,
       categoria_id: r.categoria_id,
       posicion_id: r.posicion_id,
+
+      tiene_contrato: Boolean(r.tiene_contrato),
 
       estado: r.estado_nombre ? { id: safeNum(r.estado_id), nombre: r.estado_nombre } : null,
       categoria: r.categoria_nombre ? { id: safeNum(r.categoria_id), nombre: r.categoria_nombre } : null,
@@ -115,8 +132,9 @@ export default async function portal_apoderado(
   /* ──────────────────────────────────────────────────────────────
      GET /api/portal-apoderado/jugadores/:rut/resumen
      - 1 endpoint: jugador + pagos + (opcional) estadisticas
-     - jugador viene enriquecido (categoria/posicion/estado/sucursal/etc)
-     - pagos vienen enriquecidos (tipo/medio/situacion con nombre)
+     - jugador viene enriquecido
+     - pagos vienen enriquecidos
+     - Incluye jugador.tiene_contrato (boolean)
   ────────────────────────────────────────────────────────────── */
   app.get("/jugadores/:rut/resumen", async (req, reply) => {
     const tokenData = verifyApoderadoToken(req.headers.authorization);
@@ -131,7 +149,7 @@ export default async function portal_apoderado(
     const rutJugador = parsed.data.rut;
     const db = getDb();
 
-    // ✅ valida pertenencia
+    // valida pertenencia
     const [own] = await db.query<any[]>(
       `SELECT 1
        FROM jugadores
@@ -141,7 +159,6 @@ export default async function portal_apoderado(
     );
     if (!own?.length) return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
 
-    // ✅ jugador con JOIN a catálogos para nombres
     const [jugRows] = await db.query<any[]>(
       `SELECT
           j.id,
@@ -169,6 +186,9 @@ export default async function portal_apoderado(
           j.estadistica_id,
           j.sucursal_id,
 
+          -- bandera liviana
+          (j.contrato_prestacion IS NOT NULL AND j.contrato_prestacion <> '') AS tiene_contrato,
+
           -- Nombres de catálogos
           c.nombre  AS categoria_nombre,
           pz.nombre AS posicion_nombre,
@@ -195,7 +215,6 @@ export default async function portal_apoderado(
     const r = jugRows?.[0] ?? null;
     if (!r) return reply.code(404).send({ ok: false, message: "NOT_FOUND" });
 
-    // Construimos el jugador con objetos tal cual espera tu frontend
     const jugador = {
       id: r.id,
       rut_jugador: r.rut_jugador,
@@ -222,7 +241,10 @@ export default async function portal_apoderado(
       estadistica_id: r.estadistica_id,
       sucursal_id: r.sucursal_id,
 
-      // ✅ objetos enriquecidos
+      // ✅ solo bandera (NO base64)
+      tiene_contrato: Boolean(r.tiene_contrato),
+
+      // objetos enriquecidos
       categoria: r.categoria_nombre ? { id: safeNum(r.categoria_id), nombre: r.categoria_nombre } : null,
       posicion: r.posicion_nombre ? { id: safeNum(r.posicion_id), nombre: r.posicion_nombre } : null,
       estado: r.estado_nombre ? { id: safeNum(r.estado_id), nombre: r.estado_nombre } : null,
@@ -232,7 +254,7 @@ export default async function portal_apoderado(
       prevision_medica: r.prevision_medica_nombre ? { id: safeNum(r.prevision_medica_id), nombre: r.prevision_medica_nombre } : null,
     };
 
-    // ✅ pagos enriquecidos con nombre (tipo/medio/situacion)
+    // pagos enriquecidos
     const [payRows] = await db.query<any[]>(
       `SELECT
           p.*,
@@ -258,15 +280,12 @@ export default async function portal_apoderado(
       fecha_pago: x.fecha_pago,
       comprobante_url: x.comprobante_url ?? null,
       observaciones: x.observaciones ?? null,
-
-      // ✅ lo que tu frontend ya intenta leer:
       tipo_pago: { id: x.tp_id ?? x.tipo_pago_id, nombre: x.tp_nombre ?? null },
       medio_pago: { id: x.mp_id ?? x.medio_pago_id, nombre: x.mp_nombre ?? null },
       situacion_pago: { id: x.sp_id ?? x.situacion_pago_id, nombre: x.sp_nombre ?? null },
     }));
 
-    // ✅ estadísticas (opcional). Si no quieres, déjalo null.
-    // Aquí uso estadistica_id del jugador, porque en tu tabla jugadores existe.
+    // estadísticas (opcional)
     let estadisticas: any = null;
     if (r.estadistica_id) {
       try {
@@ -284,9 +303,74 @@ export default async function portal_apoderado(
   });
 
   /* ──────────────────────────────────────────────────────────────
+     ✅ NUEVO
+     GET /api/portal-apoderado/jugadores/:rut/contrato
+     - Devuelve PDF binario (application/pdf) para abrir en pestaña
+  ────────────────────────────────────────────────────────────── */
+  app.get("/jugadores/:rut/contrato", async (req, reply) => {
+    const tokenData = verifyApoderadoToken(req.headers.authorization);
+    if (!tokenData) return reply.code(401).send({ ok: false, message: "UNAUTHORIZED" });
+
+    const guard = await requireApoderadoPortalOk(tokenData.rut);
+    if (!guard.ok) return reply.code(guard.code).send({ ok: false, message: guard.message });
+
+    const parsed = RutJugadorParam.safeParse(req.params);
+    if (!parsed.success) return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
+
+    const rutJugador = parsed.data.rut;
+    const db = getDb();
+
+    // valida pertenencia
+    const [own] = await db.query<any[]>(
+      `SELECT 1
+       FROM jugadores
+       WHERE rut_jugador = ? AND rut_apoderado = ?
+       LIMIT 1`,
+      [rutJugador, tokenData.rut]
+    );
+    if (!own?.length) return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
+
+    // trae contrato
+    const [rows] = await db.query<any[]>(
+      `SELECT contrato_prestacion, contrato_prestacion_mime, nombre_jugador
+       FROM jugadores
+       WHERE rut_jugador = ?
+       LIMIT 1`,
+      [rutJugador]
+    );
+
+    const r = rows?.[0];
+    if (!r) return reply.code(404).send({ ok: false, message: "NOT_FOUND" });
+
+    if (!hasB64(r.contrato_prestacion)) {
+      return reply.code(404).send({ ok: false, message: "NO_CONTRATO" });
+    }
+
+    const mime = String(r.contrato_prestacion_mime || "application/pdf").toLowerCase();
+    if (!mime.includes("application/pdf")) {
+      return reply.code(415).send({ ok: false, message: "UNSUPPORTED_MEDIA_TYPE" });
+    }
+
+    const clean = cleanBase64(r.contrato_prestacion);
+
+    let buf: Buffer;
+    try {
+      buf = Buffer.from(clean, "base64");
+    } catch {
+      return reply.code(500).send({ ok: false, message: "CONTRATO_INVALIDO" });
+    }
+
+    // headers para ver en navegador
+    reply.header("Content-Type", "application/pdf");
+    reply.header("Content-Disposition", `inline; filename="Contrato_${rutJugador}.pdf"`);
+    reply.header("Cache-Control", "no-store, max-age=0");
+
+    return reply.send(buf);
+  });
+
+  /* ──────────────────────────────────────────────────────────────
      GET /api/portal-apoderado/jugadores/:rut/pagos
-     - Opcional: si ya usas /resumen, podrías eliminarlo.
-     - Lo dejo, pero enriquecido (para que no muestre IDs).
+     - Opcional si ya usas /resumen, pero lo dejamos.
   ────────────────────────────────────────────────────────────── */
   app.get("/jugadores/:rut/pagos", async (req, reply) => {
     const tokenData = verifyApoderadoToken(req.headers.authorization);
