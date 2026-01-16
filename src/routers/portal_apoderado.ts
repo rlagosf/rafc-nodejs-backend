@@ -4,7 +4,9 @@ import jwt from "jsonwebtoken";
 import { z } from "zod";
 import { getDb } from "../db";
 
-const JWT_SECRET = process.env.JWT_SECRET as string;
+import { CONFIG } from "../config";
+const JWT_SECRET = CONFIG.JWT_SECRET;
+
 
 type ApoderadoToken = { type: "apoderado"; rut: string };
 
@@ -18,6 +20,7 @@ function verifyApoderadoToken(authHeader?: string): ApoderadoToken | null {
     if (decoded?.type !== "apoderado") return null;
 
     const rut = String(decoded?.rut ?? "");
+    // Tu regla: 8 dígitos sin DV
     if (!/^\d{8}$/.test(rut)) return null;
 
     return { type: "apoderado", rut };
@@ -68,6 +71,77 @@ export default async function portal_apoderado(
   app: FastifyInstance,
   _opts: FastifyPluginOptions
 ) {
+  /* ──────────────────────────────────────────────────────────────
+     ✅ NUEVO
+     GET /api/portal-apoderado/me
+     - Perfil básico del apoderado autenticado (para tu título "Bienvenido ...")
+     - Usa apoderados_auth si existe nombre/email/telefono
+     - Fallback: nombre/telefono desde jugadores
+  ────────────────────────────────────────────────────────────── */
+  app.get("/me", async (req, reply) => {
+    const tokenData = verifyApoderadoToken(req.headers.authorization);
+    if (!tokenData) {
+      return reply.code(401).send({ ok: false, message: "UNAUTHORIZED" });
+    }
+
+    const guard = await requireApoderadoPortalOk(tokenData.rut);
+    if (!guard.ok) {
+      return reply.code(guard.code).send({ ok: false, message: guard.message });
+    }
+
+    const db = getDb();
+
+    let ap: any = null;
+
+    // 1) Intento preferente: apoderados_auth (si tiene nombre/email/telefono)
+    try {
+      const [rows] = await db.query<any[]>(
+        `SELECT rut_apoderado, nombre_apoderado, email, telefono
+         FROM apoderados_auth
+         WHERE rut_apoderado = ?
+         LIMIT 1`,
+        [tokenData.rut]
+      );
+      if (rows?.length) ap = rows[0];
+    } catch {
+      // Si tu tabla no tiene esas columnas, no rompemos; hacemos fallback
+      ap = ap ?? null;
+    }
+
+    // 2) Fallback: desde jugadores (muchas veces ahí sí está el nombre del apoderado)
+    if (!String(ap?.nombre_apoderado ?? "").trim()) {
+      const [jrows] = await db.query<any[]>(
+        `SELECT nombre_apoderado, telefono_apoderado
+         FROM jugadores
+         WHERE rut_apoderado = ?
+           AND nombre_apoderado IS NOT NULL
+           AND nombre_apoderado <> ''
+         ORDER BY id DESC
+         LIMIT 1`,
+        [tokenData.rut]
+      );
+
+      if (jrows?.length) {
+        ap = {
+          ...(ap || {}),
+          rut_apoderado: ap?.rut_apoderado ?? tokenData.rut,
+          nombre_apoderado: jrows[0].nombre_apoderado,
+          telefono: ap?.telefono ?? jrows[0].telefono_apoderado ?? null,
+        };
+      }
+    }
+
+    return reply.send({
+      ok: true,
+      apoderado: {
+        rut_apoderado: String(ap?.rut_apoderado ?? tokenData.rut),
+        nombre_apoderado: String(ap?.nombre_apoderado ?? "").trim(),
+        email: ap?.email ?? null,
+        telefono: ap?.telefono ?? null,
+      },
+    });
+  });
+
   /* ──────────────────────────────────────────────────────────────
      GET /api/portal-apoderado/mis-jugadores
      - Devuelve jugadores asociados al apoderado, con nombres de catálogos
@@ -303,7 +377,6 @@ export default async function portal_apoderado(
   });
 
   /* ──────────────────────────────────────────────────────────────
-     ✅ NUEVO
      GET /api/portal-apoderado/jugadores/:rut/contrato
      - Devuelve PDF binario (application/pdf) para abrir en pestaña
   ────────────────────────────────────────────────────────────── */
@@ -332,7 +405,7 @@ export default async function portal_apoderado(
 
     // trae contrato
     const [rows] = await db.query<any[]>(
-      `SELECT contrato_prestacion, contrato_prestacion_mime, nombre_jugador
+      `SELECT contrato_prestacion, contrato_prestacion_mime
        FROM jugadores
        WHERE rut_jugador = ?
        LIMIT 1`,

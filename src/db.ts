@@ -12,6 +12,9 @@ export let db: mysql.Pool;
  * Inicializa el pool de conexiones a MySQL (solo una vez).
  * Si varios módulos llaman a initDb() al mismo tiempo,
  * todos reutilizan la misma promesa y NO se crean múltiples pools.
+ * database:realacad_development_database
+ * username:realacad_development_database
+ * pass:wAvhXuyWb4FwXV4pab7c
  */
 export async function initDb(): Promise<mysql.Pool> {
   // Ya está creado → reutilizamos

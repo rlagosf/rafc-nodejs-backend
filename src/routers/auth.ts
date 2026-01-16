@@ -52,6 +52,87 @@ async function audit(
   }
 }
 
+/* ───────────────────────── Helpers ───────────────────────── */
+
+const ALLOWED_PANEL_ROLES = new Set([1, 2]); // 1=admin, 2=staff
+const ACTIVE_ESTADO_ID = 1;
+
+function getBearerToken(req: FastifyRequest) {
+  const h = (req.headers.authorization || '').trim();
+  const [type, token] = h.split(' ');
+  if (type !== 'Bearer' || !token) return null;
+  return token;
+}
+
+/**
+ * ✅ requireAuth (mínimo) para /auth/logout:
+ * - valida JWT
+ * - valida usuario en BD (estado activo + rol permitido)
+ * - setea req.user
+ */
+async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
+  const token = getBearerToken(req);
+  if (!token) {
+    void audit('access_denied', req, 401, null, { reason: 'missing_token' });
+    return reply.code(401).send({ ok: false, message: 'Token requerido' });
+  }
+
+  let decoded: any;
+  try {
+    decoded = jwt.verify(token, CONFIG.JWT_SECRET);
+  } catch {
+    void audit('invalid_token', req, 401, null, { reason: 'jwt_verify_failed' });
+    return reply.code(401).send({ ok: false, message: 'Token inválido' });
+  }
+
+  const userId = Number(decoded?.sub);
+  if (!Number.isFinite(userId) || userId <= 0) {
+    void audit('invalid_token', req, 401, null, { reason: 'invalid_sub' });
+    return reply.code(401).send({ ok: false, message: 'Token inválido' });
+  }
+
+  try {
+    const [rows]: any = await db.query(
+      `SELECT id, nombre_usuario, email, rol_id, estado_id
+       FROM usuarios
+       WHERE id = ?
+       LIMIT 1`,
+      [userId]
+    );
+
+    if (!rows?.length) {
+      void audit('access_denied', req, 401, userId, { reason: 'user_not_found' });
+      return reply.code(401).send({ ok: false, message: 'No autorizado' });
+    }
+
+    const user = rows[0];
+    const rol = Number(user.rol_id);
+    const estado = Number(user.estado_id);
+
+    if (estado !== ACTIVE_ESTADO_ID) {
+      void audit('access_denied', req, 403, user.id, { reason: 'user_inactive', estado_id: estado });
+      return reply.code(403).send({ ok: false, message: 'Usuario inactivo' });
+    }
+
+    if (!ALLOWED_PANEL_ROLES.has(rol)) {
+      void audit('access_denied', req, 403, user.id, { reason: 'role_not_allowed', rol_id: rol });
+      return reply.code(403).send({ ok: false, message: 'No autorizado' });
+    }
+
+    (req as any).user = {
+      id: user.id,
+      nombre_usuario: user.nombre_usuario,
+      email: user.email,
+      rol_id: rol,
+      estado_id: estado,
+    };
+  } catch (err: any) {
+    req.log.error({ err }, 'requireAuth failed');
+    void audit('access_denied', req, 500, userId, { reason: 'db_error', message: err?.message });
+    return reply.code(500).send({ ok: false, message: 'Error de autenticación' });
+  }
+}
+
 /* ───────────────────────── Schemas ───────────────────────── */
 
 const LoginSchema = z.object({
@@ -76,9 +157,7 @@ export default async function auth(app: FastifyInstance) {
     async (req: FastifyRequest, reply: FastifyReply) => {
       const parsed = LoginSchema.safeParse(req.body);
       if (!parsed.success) {
-        void audit('access_denied', req, 400, null, {
-          reason: 'invalid_payload',
-        });
+        void audit('access_denied', req, 400, null, { reason: 'invalid_payload' });
         return reply.code(400).send({ ok: false, message: 'Payload inválido' });
       }
 
@@ -102,42 +181,58 @@ export default async function auth(app: FastifyInstance) {
         }
 
         const user = rows[0];
+        const rol = Number(user.rol_id);
+        const estado = Number(user.estado_id);
+
+        // ✅ 1) Estado activo obligatorio
+        if (estado !== ACTIVE_ESTADO_ID) {
+          void audit('access_denied', req, 403, user.id, {
+            reason: 'user_inactive',
+            estado_id: estado,
+          });
+          return reply.code(403).send({ ok: false, message: 'Usuario inactivo' });
+        }
+
+        // ✅ 2) Solo roles permitidos al panel (1 admin, 2 staff)
+        if (!ALLOWED_PANEL_ROLES.has(rol)) {
+          void audit('access_denied', req, 403, user.id, {
+            reason: 'role_not_allowed',
+            rol_id: rol,
+          });
+          return reply.code(403).send({ ok: false, message: 'No autorizado' });
+        }
 
         const ok = await argon2Verify(user.password, password);
         if (!ok) {
-          void audit('access_denied', req, 401, user.id, {
-            reason: 'bad_password',
-          });
+          void audit('access_denied', req, 401, user.id, { reason: 'bad_password' });
           return reply.code(401).send({ ok: false, message: 'Credenciales inválidas' });
         }
 
         const payload = {
           sub: user.id,
           nombre_usuario: user.nombre_usuario,
-          rol_id: user.rol_id,
+          rol_id: rol,
         };
 
         const signOpts: SignOptions = {};
         if (CONFIG.JWT_EXPIRES_IN) {
-          signOpts.expiresIn =
-            CONFIG.JWT_EXPIRES_IN as unknown as jwt.SignOptions['expiresIn'];
+          signOpts.expiresIn = CONFIG.JWT_EXPIRES_IN as unknown as jwt.SignOptions['expiresIn'];
         }
 
         const rafc_token = jwt.sign(payload, CONFIG.JWT_SECRET, signOpts);
 
-        // 🔥 auditoría NO bloqueante
         void audit('login', req, 200, user.id);
 
         return reply.send({
           ok: true,
           rafc_token,
-          rol_id: user.rol_id,
+          rol_id: rol,
           user: {
             id: user.id,
             nombre_usuario: user.nombre_usuario,
             email: user.email,
-            rol_id: user.rol_id,
-            estado_id: user.estado_id,
+            rol_id: rol,
+            estado_id: estado,
           },
         });
       } catch (err: any) {
@@ -146,21 +241,15 @@ export default async function auth(app: FastifyInstance) {
           reason: 'exception',
           message: err?.message,
         });
-        return reply.code(500).send({
-          ok: false,
-          message: 'Error procesando login',
-        });
+        return reply.code(500).send({ ok: false, message: 'Error procesando login' });
       }
     }
   );
 
   /* ───────── POST /auth/logout ───────── */
-  app.post('/logout', async (req: FastifyRequest, reply: FastifyReply) => {
+  app.post('/logout', { preHandler: [requireAuth] }, async (req: FastifyRequest, reply: FastifyReply) => {
     const userId = (req as any).user?.id ?? null;
-
-    // 🔥 auditoría NO bloqueante
     void audit('logout', req, 200, userId);
-
     return reply.send({ ok: true, message: 'logout' });
   });
 }

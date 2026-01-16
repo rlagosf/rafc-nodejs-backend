@@ -1,6 +1,10 @@
+// src/routers/eventos.ts
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { db } from "../db";
+
+// ✅ Ajusta si tu path difiere
+import { requireAuth, requireRoles } from "../middlewares/authz";
 
 /**
  * Tabla: eventos
@@ -62,242 +66,247 @@ function sendDbError(reply: FastifyReply, message: string, err: any) {
   });
 }
 
-
 export default async function eventos(app: FastifyInstance) {
-  // Health
+  // 🔐 Roles permitidos: 1 y 2
+  const onlyRoles12 = [requireAuth, requireRoles([1, 2])];
+
+  // Health (público)
   app.get("/health", async () => ({
     module: "eventos",
     status: "ready",
     timestamp: new Date().toISOString(),
   }));
 
-  // GET /eventos (con paginación opcional)
-  app.get("/", async (req: FastifyRequest, reply: FastifyReply) => {
-    const parsed = PageQuery.safeParse(req.query);
-    const { limit, offset } = parsed.success
-      ? parsed.data
-      : { limit: 50, offset: 0 };
+  // GET /eventos (rol 1 y 2)
+  app.get(
+    "/",
+    { preHandler: onlyRoles12 },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const parsed = PageQuery.safeParse(req.query);
+      const { limit, offset } = parsed.success ? parsed.data : { limit: 50, offset: 0 };
 
-    try {
-      const [rows]: any = await db.query(
-        `SELECT id, titulo, descripcion, fecha_inicio, fecha_fin, creado_en, actualizado_en
-           FROM eventos
-          ORDER BY fecha_inicio DESC, id DESC
-          LIMIT ? OFFSET ?`,
-        [Number(limit), Number(offset)]
-      );
+      try {
+        const [rows]: any = await db.query(
+          `SELECT id, titulo, descripcion, fecha_inicio, fecha_fin, creado_en, actualizado_en
+             FROM eventos
+            ORDER BY fecha_inicio DESC, id DESC
+            LIMIT ? OFFSET ?`,
+          [Number(limit), Number(offset)]
+        );
 
-      return reply.send({ ok: true, items: rows, limit, offset });
-    } catch (err: any) {
-      req.log.error({ err }, "GET /eventos failed");
-      return sendDbError(reply, "Error al listar eventos", err);
+        return reply.send({ ok: true, items: rows, limit, offset });
+      } catch (err: any) {
+        req.log.error({ err }, "GET /eventos failed");
+        return sendDbError(reply, "Error al listar eventos", err);
+      }
     }
-  });
+  );
 
-  // GET /eventos/:id
-  app.get("/:id", async (req: FastifyRequest, reply: FastifyReply) => {
-    const parsed = IdParam.safeParse(req.params);
-    if (!parsed.success) {
-      return reply.code(400).send({ ok: false, message: "ID inválido" });
-    }
-
-    const id = Number(parsed.data.id);
-
-    try {
-      const [rows]: any = await db.query(
-        `SELECT id, titulo, descripcion, fecha_inicio, fecha_fin, creado_en, actualizado_en
-           FROM eventos
-          WHERE id = ? LIMIT 1`,
-        [id]
-      );
-
-      if (!rows.length) {
-        return reply.code(404).send({ ok: false, message: "No encontrado" });
+  // GET /eventos/:id (rol 1 y 2)
+  app.get(
+    "/:id",
+    { preHandler: onlyRoles12 },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const parsed = IdParam.safeParse(req.params);
+      if (!parsed.success) {
+        return reply.code(400).send({ ok: false, message: "ID inválido" });
       }
 
-      return reply.send({ ok: true, item: rows[0] });
-    } catch (err: any) {
-      req.log.error({ err, id }, "GET /eventos/:id failed");
-      return sendDbError(reply, "Error al obtener evento", err);
-    }
-  });
+      const id = Number(parsed.data.id);
 
-  // POST /eventos
-  app.post("/", async (req: FastifyRequest, reply: FastifyReply) => {
-    const parsed = CreateSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return reply.code(400).send({
-        ok: false,
-        message: "Payload inválido",
-        errors: parsed.error.flatten(),
-      });
-    }
+      try {
+        const [rows]: any = await db.query(
+          `SELECT id, titulo, descripcion, fecha_inicio, fecha_fin, creado_en, actualizado_en
+             FROM eventos
+            WHERE id = ? LIMIT 1`,
+          [id]
+        );
 
-    const { titulo, descripcion, fecha_inicio, fecha_fin } = parsed.data;
+        if (!rows.length) return reply.code(404).send({ ok: false, message: "No encontrado" });
 
-    const ini = toSQLDateTime(fecha_inicio);
-    const fin = toSQLDateTime(fecha_fin);
-
-    if (!ini || !fin) {
-      return reply.code(400).send({
-        ok: false,
-        message: "Formato de fecha inválido",
-      });
-    }
-
-    if (new Date(ini) >= new Date(fin)) {
-      return reply.code(400).send({
-        ok: false,
-        message: "fecha_fin debe ser mayor que fecha_inicio",
-      });
-    }
-
-    try {
-      const [result]: any = await db.query(
-        `INSERT INTO eventos (titulo, descripcion, fecha_inicio, fecha_fin, creado_en, actualizado_en)
-         VALUES (?, ?, ?, ?, NOW(), NOW())`,
-        [titulo, descripcion ?? null, ini, fin]
-      );
-
-      const id = result.insertId;
-
-      const [rows]: any = await db.query(
-        `SELECT id, titulo, descripcion, fecha_inicio, fecha_fin, creado_en, actualizado_en
-           FROM eventos
-          WHERE id = ?`,
-        [id]
-      );
-
-      return reply.code(201).send({ ok: true, item: rows[0] });
-    } catch (err: any) {
-      req.log.error({ err }, "POST /eventos failed");
-      return sendDbError(reply, "Error al crear evento", err);
-    }
-  });
-
-  // PUT /eventos/:id (SOLIDO: sin SET ?)
-  app.put("/:id", async (req: FastifyRequest, reply: FastifyReply) => {
-    const pid = IdParam.safeParse(req.params);
-    if (!pid.success) {
-      return reply.code(400).send({ ok: false, message: "ID inválido" });
-    }
-    const id = Number(pid.data.id);
-
-    const parsed = UpdateSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return reply.code(400).send({
-        ok: false,
-        message: "Payload inválido",
-        errors: parsed.error.flatten(),
-      });
-    }
-
-    const fields: string[] = [];
-    const values: any[] = [];
-
-    if (parsed.data.titulo !== undefined) {
-      fields.push("titulo = ?");
-      values.push(parsed.data.titulo);
-    }
-
-    if (parsed.data.descripcion !== undefined) {
-      fields.push("descripcion = ?");
-      values.push(parsed.data.descripcion ?? null);
-    }
-
-    let iniTmp: string | null = null;
-    let finTmp: string | null = null;
-
-    if (parsed.data.fecha_inicio !== undefined) {
-      const ini = toSQLDateTime(parsed.data.fecha_inicio);
-      if (!ini) return reply.code(400).send({ ok: false, message: "fecha_inicio inválida" });
-      iniTmp = ini;
-      fields.push("fecha_inicio = ?");
-      values.push(ini);
-    }
-
-    if (parsed.data.fecha_fin !== undefined) {
-      const fin = toSQLDateTime(parsed.data.fecha_fin);
-      if (!fin) return reply.code(400).send({ ok: false, message: "fecha_fin inválida" });
-      finTmp = fin;
-      fields.push("fecha_fin = ?");
-      values.push(fin);
-    }
-
-    // Si ambas vienen en el payload, validamos rango
-    if (iniTmp && finTmp && new Date(iniTmp) >= new Date(finTmp)) {
-      return reply.code(400).send({
-        ok: false,
-        message: "fecha_fin debe ser mayor que fecha_inicio",
-      });
-    }
-
-    if (fields.length === 0) {
-      return reply.code(400).send({
-        ok: false,
-        message: "No hay campos para actualizar",
-      });
-    }
-
-    try {
-      // añade updated_at
-      const sql = `UPDATE eventos SET ${fields.join(", ")}, actualizado_en = NOW() WHERE id = ?`;
-      values.push(id);
-
-      const [result]: any = await db.query(sql, values);
-
-      if (!result?.affectedRows) {
-        return reply.code(404).send({ ok: false, message: "No encontrado" });
+        return reply.send({ ok: true, item: rows[0] });
+      } catch (err: any) {
+        req.log.error({ err, id }, "GET /eventos/:id failed");
+        return sendDbError(reply, "Error al obtener evento", err);
       }
-
-      const [rows]: any = await db.query(
-        `SELECT id, titulo, descripcion, fecha_inicio, fecha_fin, creado_en, actualizado_en
-           FROM eventos
-          WHERE id = ?`,
-        [id]
-      );
-
-      return reply.send({ ok: true, item: rows[0] });
-    } catch (err: any) {
-      req.log.error({ err, id }, "PUT /eventos/:id failed");
-      return sendDbError(reply, "Error al actualizar evento", err);
     }
-  });
+  );
 
-  // DELETE /eventos/:id (SOLIDO)
-  app.delete("/:id", async (req: FastifyRequest, reply: FastifyReply) => {
-    const parsed = IdParam.safeParse(req.params);
-    if (!parsed.success) {
-      return reply.code(400).send({ ok: false, message: "ID inválido" });
-    }
-
-    const id = Number(parsed.data.id);
-
-    try {
-      const [result]: any = await db.query("DELETE FROM eventos WHERE id = ?", [id]);
-
-      if (!result?.affectedRows) {
-        return reply.code(404).send({ ok: false, message: "No encontrado" });
-      }
-
-      return reply.send({ ok: true, deleted: id });
-    } catch (err: any) {
-      req.log.error(
-        { err, id, errno: err?.errno, code: err?.code, sqlMessage: err?.sqlMessage },
-        "DELETE /eventos/:id failed"
-      );
-
-      // MariaDB/MySQL: FK constraint
-      if (err?.errno === 1451 || String(err?.code || "").includes("ER_ROW_IS_REFERENCED")) {
-        return reply.code(409).send({
+  // POST /eventos (rol 1 y 2)
+  app.post(
+    "/",
+    { preHandler: onlyRoles12 },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const parsed = CreateSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send({
           ok: false,
-          message: "No se puede eliminar: el evento está asociado a otros registros",
-          error: err?.sqlMessage || err?.message,
+          message: "Payload inválido",
+          errors: parsed.error.flatten(),
         });
       }
 
-      return sendDbError(reply, "Error al eliminar evento", err);
-    }
-  });
+      const { titulo, descripcion, fecha_inicio, fecha_fin } = parsed.data;
 
+      const ini = toSQLDateTime(fecha_inicio);
+      const fin = toSQLDateTime(fecha_fin);
+
+      if (!ini || !fin) {
+        return reply.code(400).send({ ok: false, message: "Formato de fecha inválido" });
+      }
+
+      if (new Date(ini) >= new Date(fin)) {
+        return reply.code(400).send({
+          ok: false,
+          message: "fecha_fin debe ser mayor que fecha_inicio",
+        });
+      }
+
+      try {
+        const [result]: any = await db.query(
+          `INSERT INTO eventos (titulo, descripcion, fecha_inicio, fecha_fin, creado_en, actualizado_en)
+           VALUES (?, ?, ?, ?, NOW(), NOW())`,
+          [titulo, descripcion ?? null, ini, fin]
+        );
+
+        const id = result.insertId;
+
+        const [rows]: any = await db.query(
+          `SELECT id, titulo, descripcion, fecha_inicio, fecha_fin, creado_en, actualizado_en
+             FROM eventos
+            WHERE id = ?`,
+          [id]
+        );
+
+        return reply.code(201).send({ ok: true, item: rows[0] });
+      } catch (err: any) {
+        req.log.error({ err }, "POST /eventos failed");
+        return sendDbError(reply, "Error al crear evento", err);
+      }
+    }
+  );
+
+  // PUT /eventos/:id (rol 1 y 2)
+  app.put(
+    "/:id",
+    { preHandler: onlyRoles12 },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const pid = IdParam.safeParse(req.params);
+      if (!pid.success) return reply.code(400).send({ ok: false, message: "ID inválido" });
+
+      const id = Number(pid.data.id);
+
+      const parsed = UpdateSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send({
+          ok: false,
+          message: "Payload inválido",
+          errors: parsed.error.flatten(),
+        });
+      }
+
+      const fields: string[] = [];
+      const values: any[] = [];
+
+      if (parsed.data.titulo !== undefined) {
+        fields.push("titulo = ?");
+        values.push(parsed.data.titulo);
+      }
+
+      if (parsed.data.descripcion !== undefined) {
+        fields.push("descripcion = ?");
+        values.push(parsed.data.descripcion ?? null);
+      }
+
+      let iniTmp: string | null = null;
+      let finTmp: string | null = null;
+
+      if (parsed.data.fecha_inicio !== undefined) {
+        const ini = toSQLDateTime(parsed.data.fecha_inicio);
+        if (!ini) return reply.code(400).send({ ok: false, message: "fecha_inicio inválida" });
+        iniTmp = ini;
+        fields.push("fecha_inicio = ?");
+        values.push(ini);
+      }
+
+      if (parsed.data.fecha_fin !== undefined) {
+        const fin = toSQLDateTime(parsed.data.fecha_fin);
+        if (!fin) return reply.code(400).send({ ok: false, message: "fecha_fin inválida" });
+        finTmp = fin;
+        fields.push("fecha_fin = ?");
+        values.push(fin);
+      }
+
+      if (iniTmp && finTmp && new Date(iniTmp) >= new Date(finTmp)) {
+        return reply.code(400).send({
+          ok: false,
+          message: "fecha_fin debe ser mayor que fecha_inicio",
+        });
+      }
+
+      if (fields.length === 0) {
+        return reply.code(400).send({ ok: false, message: "No hay campos para actualizar" });
+      }
+
+      try {
+        const sql = `UPDATE eventos SET ${fields.join(", ")}, actualizado_en = NOW() WHERE id = ?`;
+        values.push(id);
+
+        const [result]: any = await db.query(sql, values);
+
+        if (!result?.affectedRows) {
+          return reply.code(404).send({ ok: false, message: "No encontrado" });
+        }
+
+        const [rows]: any = await db.query(
+          `SELECT id, titulo, descripcion, fecha_inicio, fecha_fin, creado_en, actualizado_en
+             FROM eventos
+            WHERE id = ?`,
+          [id]
+        );
+
+        return reply.send({ ok: true, item: rows[0] });
+      } catch (err: any) {
+        req.log.error({ err, id }, "PUT /eventos/:id failed");
+        return sendDbError(reply, "Error al actualizar evento", err);
+      }
+    }
+  );
+
+  // DELETE /eventos/:id (rol 1 y 2)
+  app.delete(
+    "/:id",
+    { preHandler: onlyRoles12 },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const parsed = IdParam.safeParse(req.params);
+      if (!parsed.success) return reply.code(400).send({ ok: false, message: "ID inválido" });
+
+      const id = Number(parsed.data.id);
+
+      try {
+        const [result]: any = await db.query("DELETE FROM eventos WHERE id = ?", [id]);
+
+        if (!result?.affectedRows) {
+          return reply.code(404).send({ ok: false, message: "No encontrado" });
+        }
+
+        return reply.send({ ok: true, deleted: id });
+      } catch (err: any) {
+        req.log.error(
+          { err, id, errno: err?.errno, code: err?.code, sqlMessage: err?.sqlMessage },
+          "DELETE /eventos/:id failed"
+        );
+
+        if (err?.errno === 1451 || String(err?.code || "").includes("ER_ROW_IS_REFERENCED")) {
+          return reply.code(409).send({
+            ok: false,
+            message: "No se puede eliminar: el evento está asociado a otros registros",
+            error: err?.sqlMessage || err?.message,
+          });
+        }
+
+        return sendDbError(reply, "Error al eliminar evento", err);
+      }
+    }
+  );
 }

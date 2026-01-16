@@ -1,7 +1,10 @@
 // src/routers/sucursalesReal.ts
-import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z, ZodError } from 'zod';
-import { db } from '../db';
+import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { z, ZodError } from "zod";
+import { db } from "../db";
+
+// ✅ Ajusta si tu path difiere
+import { requireAuth, requireRoles } from "../middlewares/authz";
 
 /**
  * Tabla: sucursales_real
@@ -12,13 +15,17 @@ const IdParam = z.object({
   id: z.coerce.number().int().positive(),
 });
 
-const CreateSchema = z.object({
-  nombre: z.string().trim().min(3, 'El nombre debe tener al menos 3 caracteres'),
-}).strict();
+const CreateSchema = z
+  .object({
+    nombre: z.string().trim().min(3, "El nombre debe tener al menos 3 caracteres"),
+  })
+  .strict();
 
-const UpdateSchema = z.object({
-  nombre: z.string().trim().min(3).optional(),
-}).strict();
+const UpdateSchema = z
+  .object({
+    nombre: z.string().trim().min(3, "El nombre debe tener al menos 3 caracteres").optional(),
+  })
+  .strict();
 
 const PageQuery = z.object({
   limit: z.coerce.number().int().positive().max(500).default(200),
@@ -26,7 +33,7 @@ const PageQuery = z.object({
   q: z.string().trim().min(1).optional(),
 });
 
-const allowedKeys = new Set(['nombre']);
+const allowedKeys = new Set(["nombre"]);
 
 function pickAllowed(body: Record<string, any>) {
   const out: Record<string, any> = {};
@@ -37,123 +44,119 @@ function pickAllowed(body: Record<string, any>) {
 function normalize(row: any) {
   return {
     id: Number(row.id),
-    nombre: String(row.nombre ?? ''),
+    nombre: String(row.nombre ?? ""),
   };
 }
 
 export default async function sucursales_real(app: FastifyInstance) {
-  // ─────────────────── HEALTH ───────────────────
-  app.get('/health', async () => ({
-    module: 'sucursales_real',
-    status: 'ready',
-    timestamp: new Date().toISOString(),
-  }));
+  // ✅ Regla de oro:
+  // - READ: roles 1 y 2
+  // - WRITE: solo rol 1
+  const canRead = [requireAuth, requireRoles([1, 2])];
+  const canWrite = [requireAuth, requireRoles([1])];
 
-  // ─────────────────── LISTADO ───────────────────
-  app.get('/', async (req: FastifyRequest, reply: FastifyReply) => {
+  // ─────────────────── HEALTH (READ) ───────────────────
+  app.get("/health", { preHandler: canRead }, async (_req, reply) => {
+    reply.header("Cache-Control", "no-store");
+    return {
+      module: "sucursales_real",
+      status: "ready",
+      timestamp: new Date().toISOString(),
+    };
+  });
+
+  // ─────────────────── LISTADO (READ) ───────────────────
+  app.get("/", { preHandler: canRead }, async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = PageQuery.safeParse((req as any).query);
-    const { limit, offset, q } = parsed.success ? parsed.data : { limit: 200, offset: 0 };
+    const { limit, offset, q } = parsed.success ? parsed.data : { limit: 200, offset: 0, q: undefined };
 
     try {
-      let sql = 'SELECT id, nombre FROM sucursales_real';
+      let sql = "SELECT id, nombre FROM sucursales_real";
       const args: any[] = [];
 
       if (q) {
-        sql += ' WHERE nombre LIKE ?';
+        sql += " WHERE nombre LIKE ?";
         args.push(`%${q}%`);
       }
 
-      sql += ' ORDER BY nombre ASC, id ASC LIMIT ? OFFSET ?';
+      sql += " ORDER BY nombre ASC, id ASC LIMIT ? OFFSET ?";
       args.push(limit, offset);
 
       const [rows]: any = await db.query(sql, args);
 
-      reply.send({
+      reply.header("Cache-Control", "no-store");
+      return reply.send({
         ok: true,
-        items: rows.map(normalize),
+        items: (rows ?? []).map(normalize),
         limit,
         offset,
-        count: rows.length,
+        count: rows?.length ?? 0,
       });
     } catch (err: any) {
-      reply.code(500).send({
+      return reply.code(500).send({
         ok: false,
-        message: 'Error al listar sucursales',
+        message: "Error al listar sucursales",
         detail: err?.message,
       });
     }
   });
 
-  // ─────────────────── OBTENER POR ID ───────────────────
-  app.get('/:id', async (req: FastifyRequest, reply: FastifyReply) => {
+  // ─────────────────── OBTENER POR ID (READ) ───────────────────
+  app.get("/:id", { preHandler: canRead }, async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = IdParam.safeParse((req as any).params);
-    if (!parsed.success)
-      return reply.code(400).send({ ok: false, message: 'ID inválido' });
+    if (!parsed.success) return reply.code(400).send({ ok: false, message: "ID inválido" });
 
     const id = parsed.data.id;
 
     try {
-      const [rows]: any = await db.query(
-        'SELECT id, nombre FROM sucursales_real WHERE id = ? LIMIT 1',
-        [id]
-      );
+      const [rows]: any = await db.query("SELECT id, nombre FROM sucursales_real WHERE id = ? LIMIT 1", [id]);
 
-      if (!rows.length)
-        return reply.code(404).send({ ok: false, message: 'Sucursal no encontrada' });
+      reply.header("Cache-Control", "no-store");
 
-      reply.send({ ok: true, item: normalize(rows[0]) });
+      if (!rows?.length) return reply.code(404).send({ ok: false, message: "Sucursal no encontrada" });
+
+      return reply.send({ ok: true, item: normalize(rows[0]) });
     } catch (err: any) {
-      reply.code(500).send({
+      return reply.code(500).send({
         ok: false,
-        message: 'Error al obtener sucursal',
+        message: "Error al obtener sucursal",
         detail: err?.message,
       });
     }
   });
 
-  // ─────────────────── CREAR ───────────────────
-  app.post('/', async (req: FastifyRequest, reply: FastifyReply) => {
+  // ─────────────────── CREAR (WRITE) ───────────────────
+  app.post("/", { preHandler: canWrite }, async (req: FastifyRequest, reply: FastifyReply) => {
     try {
       const parsed = CreateSchema.parse((req as any).body);
       const data = pickAllowed(parsed);
+      if (typeof data.nombre === "string") data.nombre = data.nombre.trim();
 
-      const [result]: any = await db.query(
-        'INSERT INTO sucursales_real SET ?',
-        [data]
-      );
+      const [result]: any = await db.query("INSERT INTO sucursales_real (nombre) VALUES (?)", [data.nombre]);
 
-      reply.code(201).send({
+      return reply.code(201).send({
         ok: true,
         id: result.insertId,
         ...data,
       });
     } catch (err: any) {
       if (err instanceof ZodError) {
-        return reply.code(400).send({
-          ok: false,
-          message: 'Datos inválidos',
-          detail: err.issues,
-        });
+        const detail = err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+        return reply.code(400).send({ ok: false, message: "Datos inválidos", detail });
       }
+
       if (err?.errno === 1062) {
-        return reply.code(409).send({
-          ok: false,
-          message: 'Ya existe una sucursal con ese nombre',
-        });
+        return reply.code(409).send({ ok: false, message: "Ya existe una sucursal con ese nombre" });
       }
-      reply.code(500).send({
-        ok: false,
-        message: 'Error al crear sucursal',
-        detail: err?.message,
-      });
+
+      return reply.code(500).send({ ok: false, message: "Error al crear sucursal", detail: err?.message });
     }
   });
 
-  // ─────────────────── ACTUALIZAR ───────────────────
-  app.put('/:id', async (req: FastifyRequest, reply: FastifyReply) => {
+  // ─────────────────── ACTUALIZAR (WRITE) ───────────────────
+  app.put("/:id", { preHandler: canWrite }, async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = IdParam.safeParse((req as any).params);
-    if (!parsed.success)
-      return reply.code(400).send({ ok: false, message: 'ID inválido' });
+    if (!parsed.success) return reply.code(400).send({ ok: false, message: "ID inválido" });
 
     const id = parsed.data.id;
 
@@ -161,80 +164,73 @@ export default async function sucursales_real(app: FastifyInstance) {
       const body = UpdateSchema.parse((req as any).body);
       const changes = pickAllowed(body);
 
-      if (Object.keys(changes).length === 0)
-        return reply.code(400).send({
-          ok: false,
-          message: 'No hay campos para actualizar',
-        });
+      if (typeof changes.nombre === "string") changes.nombre = changes.nombre.trim();
+
+      if (Object.keys(changes).length === 0) {
+        return reply.code(400).send({ ok: false, message: "No hay campos para actualizar" });
+      }
+
+      // más compatible que "SET ?" si te ha dado dramas en otros hosts
+      const setClauses: string[] = [];
+      const values: any[] = [];
+
+      if (changes.nombre !== undefined) {
+        setClauses.push("nombre = ?");
+        values.push(changes.nombre);
+      }
+
+      values.push(id);
 
       const [result]: any = await db.query(
-        'UPDATE sucursales_real SET ? WHERE id = ?',
-        [changes, id]
+        `UPDATE sucursales_real SET ${setClauses.join(", ")} WHERE id = ?`,
+        values
       );
 
-      if (result.affectedRows === 0)
-        return reply.code(404).send({
-          ok: false,
-          message: 'Sucursal no encontrada',
-        });
+      if (result.affectedRows === 0) {
+        return reply.code(404).send({ ok: false, message: "Sucursal no encontrada" });
+      }
 
-      reply.send({
-        ok: true,
-        updated: { id, ...changes },
-      });
+      return reply.send({ ok: true, updated: { id, ...changes } });
     } catch (err: any) {
       if (err instanceof ZodError) {
-        return reply.code(400).send({
-          ok: false,
-          message: 'Datos inválidos',
-          detail: err.issues,
-        });
+        const detail = err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+        return reply.code(400).send({ ok: false, message: "Datos inválidos", detail });
       }
+
       if (err?.errno === 1062) {
-        return reply.code(409).send({
-          ok: false,
-          message: 'Ya existe una sucursal con ese nombre',
-        });
+        return reply.code(409).send({ ok: false, message: "Ya existe una sucursal con ese nombre" });
       }
-      reply.code(500).send({
-        ok: false,
-        message: 'Error al actualizar sucursal',
-        detail: err?.message,
-      });
+
+      return reply.code(500).send({ ok: false, message: "Error al actualizar sucursal", detail: err?.message });
     }
   });
 
-  // ─────────────────── ELIMINAR ───────────────────
-  app.delete('/:id', async (req: FastifyRequest, reply: FastifyReply) => {
+  // ─────────────────── ELIMINAR (WRITE) ───────────────────
+  app.delete("/:id", { preHandler: canWrite }, async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = IdParam.safeParse((req as any).params);
-    if (!parsed.success)
-      return reply.code(400).send({ ok: false, message: 'ID inválido' });
+    if (!parsed.success) return reply.code(400).send({ ok: false, message: "ID inválido" });
 
     const id = parsed.data.id;
 
     try {
-      const [result]: any = await db.query(
-        'DELETE FROM sucursales_real WHERE id = ?',
-        [id]
-      );
+      const [result]: any = await db.query("DELETE FROM sucursales_real WHERE id = ?", [id]);
 
-      if (result.affectedRows === 0)
-        return reply.code(404).send({
-          ok: false,
-          message: 'Sucursal no encontrada',
-        });
+      if (result.affectedRows === 0) {
+        return reply.code(404).send({ ok: false, message: "Sucursal no encontrada" });
+      }
 
-      reply.send({ ok: true, deleted: id });
+      return reply.send({ ok: true, deleted: id });
     } catch (err: any) {
       if (err?.errno === 1451) {
         return reply.code(409).send({
           ok: false,
-          message: 'No se puede eliminar: hay jugadores vinculados a esta sucursal',
+          message: "No se puede eliminar: hay jugadores vinculados a esta sucursal",
         });
       }
-      reply.code(500).send({
+
+      return reply.code(500).send({
         ok: false,
-        message: 'Error al eliminar sucursal',
+        message: "Error al eliminar sucursal",
         detail: err?.message,
       });
     }

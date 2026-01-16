@@ -2,19 +2,17 @@ import type { FastifyInstance, FastifyPluginOptions } from "fastify";
 import { z } from "zod";
 import { getDb } from "../db";
 
+// ✅ Ajusta la ruta si tu middleware está en otro path real:
+import { requireAuth, requireRoles } from "../middlewares/authz";
+
 /**
  * ✅ Reglas:
- * - GET es público (sirve para landing y para panel)
- * - POST/PATCH/DELETE requieren admin
+ * - Landing público: GET /?mode=landing
+ * - Panel protegido: GET / (default mode=panel) requiere rol 1 y 2
+ * - POST/PATCH/DELETE protegido: rol 1 y 2
  * - Estado se maneja por estado_noticia_id (catálogo)
  * - Archivada por defecto = id 3 (fallback), pero se puede resolver por nombre
  */
-
-// ⚠️ Reemplaza por tu guard real
-async function requireAdmin(_req: any, reply: any) {
-  // if (!authorized) return reply.code(401).send({ ok:false, message:"UNAUTHORIZED" });
-  return true;
-}
 
 // ✅ Bool robusto (evita Boolean("false") === true)
 const BoolLike = z.preprocess((v) => {
@@ -133,16 +131,29 @@ const UpdateSchema = BaseSchema.partial().extend({
 });
 
 export default async function admin_noticias(app: FastifyInstance, _opts: FastifyPluginOptions) {
+  // ✅ Guard reutilizable: rol 1 y 2
+  const onlyRoles12 = [requireAuth, requireRoles([1, 2])];
+
   /**
    * ✅ GET /api/admin-noticias
-   * - mode=panel (default): lista para admin/panel (sin base64)
-   * - mode=landing: devuelve { popup, cards } (sin contenido/base64)
+   * - mode=landing: público
+   * - mode=panel (default): protegido (rol 1 y 2)
    */
   app.get("/", async (req, reply) => {
     const parsed = ListQuerySchema.safeParse(req.query);
     if (!parsed.success) return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
 
     const { mode, q, estado_noticia_id, include_archived, limit, offset } = parsed.data;
+
+    // 🔐 Panel: proteger (landing queda público)
+    if (mode !== "landing") {
+      for (const guard of onlyRoles12) {
+        const r = await guard(req as any, reply as any);
+        if ((reply as any).sent) return;
+        if (r === false) return;
+      }
+    }
+
     const db = getDb();
 
     const archivadaId =
@@ -270,9 +281,9 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
 
   /**
    * ✅ GET /api/admin-noticias/:id
-   * - Devuelve detalle (incluye base64)
+   * 🔐 Protegido: incluye base64 + contenido
    */
-  app.get("/:id", async (req, reply) => {
+  app.get("/:id", { preHandler: onlyRoles12 }, async (req, reply) => {
     const parsed = IdSchema.safeParse(req.params);
     if (!parsed.success) return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
 
@@ -295,11 +306,9 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
   });
 
   /**
-   * ✅ POST /api/admin-noticias (ADMIN)
+   * ✅ POST /api/admin-noticias (rol 1 y 2)
    */
-  app.post("/", async (req, reply) => {
-    await requireAdmin(req, reply);
-
+  app.post("/", { preHandler: onlyRoles12 }, async (req, reply) => {
     const parsed = CreateSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
 
@@ -316,7 +325,6 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
       return reply.code(400).send({ ok: false, message: "POPUP_START_REQUIRED" });
     }
 
-    // ✅ coherencia de imagen en CREATE (si viene base64, exigir mime/bytes)
     if (d.imagen_base64) {
       if (!d.imagen_mime || d.imagen_bytes == null) {
         return reply.code(400).send({ ok: false, message: "IMAGE_FIELDS_INCOMPLETE" });
@@ -367,7 +375,8 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
           pin.pinned,
           pin.pinned_order,
 
-          null, // TODO admin id real
+          // ✅ Ideal: tomarlo del token (depende de tu authz)
+          (req as any).user?.id ?? null,
         ]
       )) as any;
 
@@ -381,13 +390,9 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
   });
 
   /**
-   * ✅ PATCH /api/admin-noticias/:id (ADMIN)
-   * - FIX: ahora actualiza/borrar imagen correctamente
-   * - FIX: no apaga popup/pinned si no viene el flag
+   * ✅ PATCH /api/admin-noticias/:id (rol 1 y 2)
    */
-  app.patch("/:id", async (req, reply) => {
-    await requireAdmin(req, reply);
-
+  app.patch("/:id", { preHandler: onlyRoles12 }, async (req, reply) => {
     const idParsed = IdSchema.safeParse(req.params);
     if (!idParsed.success) return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
 
@@ -398,7 +403,6 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
     const d = bodyParsed.data;
     const db = getDb();
 
-    // ✅ leer estado actual para evitar “autodesactivaciones” de popup/pinned
     const [[current]] = (await db.query(
       `
       SELECT
@@ -422,7 +426,6 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
 
     const sets: string[] = [];
     const params: any[] = [];
-
     const add = (col: string, val: any) => {
       sets.push(`${col} = ?`);
       params.push(val);
@@ -433,7 +436,6 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
     if (d.resumen !== undefined) add("resumen", d.resumen ?? null);
     if (d.contenido !== undefined) add("contenido", d.contenido ?? null);
 
-    // ✅ Popup: usa current si no viene el flag, pero sí vienen fechas
     if (d.is_popup !== undefined || d.popup_start_at !== undefined || d.popup_end_at !== undefined) {
       const popup = normalizePopup({
         is_popup: d.is_popup !== undefined ? d.is_popup : current.is_popup,
@@ -450,7 +452,6 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
       add("popup_end_at", popup.popup_end_at);
     }
 
-    // ✅ Pinned: usa current si no viene pinned, pero sí viene pinned_order
     if (d.pinned !== undefined || d.pinned_order !== undefined) {
       const pin = normalizePinned({
         pinned: d.pinned !== undefined ? d.pinned : current.pinned,
@@ -461,12 +462,10 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
       add("pinned_order", pin.pinned_order);
     }
 
-    // ✅ Imagen: diferenciar "no vino" vs "vino null"
     const hasImgMime = Object.prototype.hasOwnProperty.call(d, "imagen_mime");
     const hasImgB64 = Object.prototype.hasOwnProperty.call(d, "imagen_base64");
     const hasImgBytes = Object.prototype.hasOwnProperty.call(d, "imagen_bytes");
 
-    // coherencia: si manda base64 no-null => exigir mime y bytes
     if (hasImgB64 && d.imagen_base64) {
       const mime = hasImgMime ? d.imagen_mime : current.imagen_mime;
       const bytes = hasImgBytes ? d.imagen_bytes : current.imagen_bytes;
@@ -475,19 +474,16 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
       }
     }
 
-    // si viene imagen_base64 explícitamente null => borrar todo
     if (hasImgB64 && d.imagen_base64 == null) {
       add("imagen_base64", null);
       add("imagen_mime", null);
       add("imagen_bytes", null);
     } else {
-      // si vienen campos individualmente, los aplicamos tal cual (incluye null)
       if (hasImgMime) add("imagen_mime", d.imagen_mime ?? null);
       if (hasImgB64) add("imagen_base64", d.imagen_base64 ?? null);
       if (hasImgBytes) add("imagen_bytes", d.imagen_bytes ?? null);
     }
 
-    // ✅ published_at + estado
     if (d.estado_noticia_id !== undefined) {
       add("estado_noticia_id", d.estado_noticia_id);
 
@@ -532,12 +528,10 @@ export default async function admin_noticias(app: FastifyInstance, _opts: Fastif
   });
 
   /**
-   * ✅ DELETE /api/admin-noticias/:id (ADMIN)
-   * - Soft archive: mueve a estado "Archivada"
+   * ✅ DELETE /api/admin-noticias/:id (rol 1 y 2)
+   * - Soft archive
    */
-  app.delete("/:id", async (req, reply) => {
-    await requireAdmin(req, reply);
-
+  app.delete("/:id", { preHandler: onlyRoles12 }, async (req, reply) => {
     const parsed = IdSchema.safeParse(req.params);
     if (!parsed.success) return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
 
