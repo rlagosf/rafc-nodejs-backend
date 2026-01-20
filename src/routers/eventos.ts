@@ -77,6 +77,33 @@ export default async function eventos(app: FastifyInstance) {
     timestamp: new Date().toISOString(),
   }));
 
+    // ✅ Público (solo lectura): próximos eventos
+  // GET /eventos/public
+  app.get(
+    "/public",
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const parsed = PageQuery.safeParse(req.query);
+      const { limit, offset } = parsed.success ? parsed.data : { limit: 50, offset: 0 };
+
+      try {
+        const [rows]: any = await db.query(
+          `SELECT id, titulo, descripcion, fecha_inicio, fecha_fin, creado_en, actualizado_en
+             FROM eventos
+            WHERE fecha_fin >= NOW()
+            ORDER BY fecha_inicio ASC, id ASC
+            LIMIT ? OFFSET ?`,
+          [Number(limit), Number(offset)]
+        );
+
+        return reply.send({ ok: true, items: rows, limit, offset });
+      } catch (err: any) {
+        req.log.error({ err }, "GET /eventos/public failed");
+        return sendDbError(reply, "Error al listar eventos públicos", err);
+      }
+    }
+  );
+
+
   // GET /eventos (rol 1 y 2)
   app.get(
     "/",

@@ -1,54 +1,80 @@
 // src/routers/portal_apoderado.ts
-import type { FastifyInstance, FastifyPluginOptions } from "fastify";
-import jwt from "jsonwebtoken";
+import type { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { getDb } from "../db";
+import { requireAuth, requireApoderado } from "../middlewares/authz";
 
-import { CONFIG } from "../config";
-const JWT_SECRET = CONFIG.JWT_SECRET;
+/* ──────────────────────────────────────────────────────────────
+   Tipos / helpers de auth (desde middleware)
+────────────────────────────────────────────────────────────── */
+type ApoderadoAuth = { type: "apoderado"; rut: string; apoderado_id?: number };
 
+function getApoderadoAuth(req: FastifyRequest, reply: FastifyReply): ApoderadoAuth | null {
+  // ✅ preferido: req.auth (nuevo)
+  const a = (req as any).auth;
 
-type ApoderadoToken = { type: "apoderado"; rut: string };
+  // 🔁 fallback por si tu middleware aún usa req.user:
+  // (pero SOLO si además trae type apoderado)
+  const u = (req as any).user;
 
-function verifyApoderadoToken(authHeader?: string): ApoderadoToken | null {
-  if (!authHeader) return null;
-  const [bearer, token] = authHeader.split(" ");
-  if (bearer !== "Bearer" || !token) return null;
+  const src = a ?? u ?? null;
+  const type = String(src?.type ?? "").toLowerCase();
+  const rut = String(src?.rut ?? "");
 
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET) as any;
-    if (decoded?.type !== "apoderado") return null;
-
-    const rut = String(decoded?.rut ?? "");
-    // Tu regla: 8 dígitos sin DV
-    if (!/^\d{8}$/.test(rut)) return null;
-
-    return { type: "apoderado", rut };
-  } catch {
+  if (type !== "apoderado" || !/^\d{8}$/.test(rut)) {
+    reply.code(401).send({ ok: false, message: "UNAUTHORIZED" });
     return null;
   }
+
+  const apoderado_id =
+    src?.apoderado_id != null && Number.isFinite(Number(src.apoderado_id))
+      ? Number(src.apoderado_id)
+      : undefined;
+
+  return { type: "apoderado", rut, apoderado_id };
 }
 
 async function requireApoderadoPortalOk(rut: string) {
   const db = getDb();
   const [rows] = await db.query<any[]>(
     `SELECT must_change_password
-     FROM apoderados_auth
-     WHERE rut_apoderado = ?
-     LIMIT 1`,
+       FROM apoderados_auth
+      WHERE rut_apoderado = ?
+      LIMIT 1`,
     [rut]
   );
 
   if (!rows?.length) return { ok: false as const, code: 401, message: "UNAUTHORIZED" };
-  if (Number(rows[0].must_change_password) === 1) {
+  if (Number(rows[0]?.must_change_password) === 1) {
     return { ok: false as const, code: 403, message: "PASSWORD_CHANGE_REQUIRED" };
   }
   return { ok: true as const };
 }
 
+async function assertGuardOrReply(rut: string, reply: FastifyReply): Promise<boolean> {
+  const guard = await requireApoderadoPortalOk(rut);
+  if (!guard.ok) {
+    reply.code(guard.code).send({ ok: false, message: guard.message });
+    return false;
+  }
+  return true;
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Schemas
+────────────────────────────────────────────────────────────── */
 const RutJugadorParam = z.object({ rut: z.string().regex(/^\d{8}$/) });
 
-/** helpers para normalizar salida */
+const FotoBodySchema = z
+  .object({
+    foto_base64: z.string().trim().nullable(),
+    foto_mime: z.string().trim().nullable(),
+  })
+  .strict();
+
+/* ──────────────────────────────────────────────────────────────
+   Utils
+────────────────────────────────────────────────────────────── */
 const safeNum = (v: any) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
@@ -56,7 +82,7 @@ const safeNum = (v: any) => {
 
 const hasB64 = (v: any) => {
   const s = String(v ?? "").trim();
-  return s.length > 50; // umbral razonable
+  return s.length > 50;
 };
 
 const cleanBase64 = (raw: any) => {
@@ -67,66 +93,81 @@ const cleanBase64 = (raw: any) => {
     .replace(/\s+/g, "");
 };
 
+async function assertJugadorPertenece(db: any, rutJugador: string, rutApoderado: string) {
+  const [own] = await db.query(
+    `SELECT 1
+       FROM jugadores
+      WHERE rut_jugador = ? AND rut_apoderado = ?
+      LIMIT 1`,
+    [rutJugador, rutApoderado]
+  );
+  return Boolean(own?.length);
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Router
+────────────────────────────────────────────────────────────── */
 export default async function portal_apoderado(
   app: FastifyInstance,
   _opts: FastifyPluginOptions
 ) {
+  // 🔒 Blindaje total: token válido + debe ser apoderado (middleware)
+  app.addHook("preHandler", requireAuth);
+  app.addHook("preHandler", requireApoderado);
+
   /* ──────────────────────────────────────────────────────────────
-     ✅ NUEVO
      GET /api/portal-apoderado/me
-     - Perfil básico del apoderado autenticado (para tu título "Bienvenido ...")
-     - Usa apoderados_auth si existe nombre/email/telefono
-     - Fallback: nombre/telefono desde jugadores
   ────────────────────────────────────────────────────────────── */
   app.get("/me", async (req, reply) => {
-    const tokenData = verifyApoderadoToken(req.headers.authorization);
-    if (!tokenData) {
-      return reply.code(401).send({ ok: false, message: "UNAUTHORIZED" });
-    }
+    const auth = getApoderadoAuth(req, reply);
+    if (!auth) return;
 
-    const guard = await requireApoderadoPortalOk(tokenData.rut);
-    if (!guard.ok) {
-      return reply.code(guard.code).send({ ok: false, message: guard.message });
-    }
+    if (!(await assertGuardOrReply(auth.rut, reply))) return;
 
     const db = getDb();
-
     let ap: any = null;
 
-    // 1) Intento preferente: apoderados_auth (si tiene nombre/email/telefono)
+    // 1) Preferente: apoderados_auth (si tiene columnas)
     try {
       const [rows] = await db.query<any[]>(
         `SELECT rut_apoderado, nombre_apoderado, email, telefono
-         FROM apoderados_auth
-         WHERE rut_apoderado = ?
-         LIMIT 1`,
-        [tokenData.rut]
+           FROM apoderados_auth
+          WHERE rut_apoderado = ?
+          LIMIT 1`,
+        [auth.rut]
       );
       if (rows?.length) ap = rows[0];
     } catch {
-      // Si tu tabla no tiene esas columnas, no rompemos; hacemos fallback
       ap = ap ?? null;
     }
 
-    // 2) Fallback: desde jugadores (muchas veces ahí sí está el nombre del apoderado)
-    if (!String(ap?.nombre_apoderado ?? "").trim()) {
+    // 2) Fallback: jugadores
+    const needsFallback =
+      !String(ap?.nombre_apoderado ?? "").trim() ||
+      !String(ap?.email ?? "").trim() ||
+      !String(ap?.telefono ?? "").trim();
+
+    if (needsFallback) {
       const [jrows] = await db.query<any[]>(
-        `SELECT nombre_apoderado, telefono_apoderado
-         FROM jugadores
-         WHERE rut_apoderado = ?
-           AND nombre_apoderado IS NOT NULL
-           AND nombre_apoderado <> ''
-         ORDER BY id DESC
-         LIMIT 1`,
-        [tokenData.rut]
+        `SELECT nombre_apoderado, telefono_apoderado, email
+           FROM jugadores
+          WHERE rut_apoderado = ?
+          ORDER BY id DESC
+          LIMIT 1`,
+        [auth.rut]
       );
 
       if (jrows?.length) {
         ap = {
           ...(ap || {}),
-          rut_apoderado: ap?.rut_apoderado ?? tokenData.rut,
-          nombre_apoderado: jrows[0].nombre_apoderado,
-          telefono: ap?.telefono ?? jrows[0].telefono_apoderado ?? null,
+          rut_apoderado: ap?.rut_apoderado ?? auth.rut,
+          nombre_apoderado: String(ap?.nombre_apoderado ?? "").trim()
+            ? ap.nombre_apoderado
+            : (jrows[0]?.nombre_apoderado ?? ""),
+          email: String(ap?.email ?? "").trim() ? ap.email : (jrows[0]?.email ?? null),
+          telefono: String(ap?.telefono ?? "").trim()
+            ? ap.telefono
+            : (jrows[0]?.telefono_apoderado ?? null),
         };
       }
     }
@@ -134,7 +175,7 @@ export default async function portal_apoderado(
     return reply.send({
       ok: true,
       apoderado: {
-        rut_apoderado: String(ap?.rut_apoderado ?? tokenData.rut),
+        rut_apoderado: String(ap?.rut_apoderado ?? auth.rut),
         nombre_apoderado: String(ap?.nombre_apoderado ?? "").trim(),
         email: ap?.email ?? null,
         telefono: ap?.telefono ?? null,
@@ -144,19 +185,12 @@ export default async function portal_apoderado(
 
   /* ──────────────────────────────────────────────────────────────
      GET /api/portal-apoderado/mis-jugadores
-     - Devuelve jugadores asociados al apoderado, con nombres de catálogos
-     - Incluye tiene_contrato (boolean)
   ────────────────────────────────────────────────────────────── */
   app.get("/mis-jugadores", async (req, reply) => {
-    const tokenData = verifyApoderadoToken(req.headers.authorization);
-    if (!tokenData) {
-      return reply.code(401).send({ ok: false, message: "UNAUTHORIZED" });
-    }
+    const auth = getApoderadoAuth(req, reply);
+    if (!auth) return;
 
-    const guard = await requireApoderadoPortalOk(tokenData.rut);
-    if (!guard.ok) {
-      return reply.code(guard.code).send({ ok: false, message: guard.message });
-    }
+    if (!(await assertGuardOrReply(auth.rut, reply))) return;
 
     const db = getDb();
 
@@ -167,34 +201,26 @@ export default async function portal_apoderado(
           j.estado_id,
           j.categoria_id,
           j.posicion_id,
-
-          -- bandera liviana (no manda base64)
           (j.contrato_prestacion IS NOT NULL AND j.contrato_prestacion <> '') AS tiene_contrato,
-
           e.nombre  AS estado_nombre,
           c.nombre  AS categoria_nombre,
           p.nombre  AS posicion_nombre
-
        FROM jugadores j
        LEFT JOIN estado     e ON e.id = j.estado_id
        LEFT JOIN categorias c ON c.id = j.categoria_id
        LEFT JOIN posiciones p ON p.id = j.posicion_id
-
        WHERE j.rut_apoderado = ?
        ORDER BY j.nombre_jugador ASC`,
-      [tokenData.rut]
+      [auth.rut]
     );
 
     const jugadores = (rows || []).map((r) => ({
       rut_jugador: r.rut_jugador,
       nombre_jugador: r.nombre_jugador,
-
       estado_id: r.estado_id,
       categoria_id: r.categoria_id,
       posicion_id: r.posicion_id,
-
       tiene_contrato: Boolean(r.tiene_contrato),
-
       estado: r.estado_nombre ? { id: safeNum(r.estado_id), nombre: r.estado_nombre } : null,
       categoria: r.categoria_nombre ? { id: safeNum(r.categoria_id), nombre: r.categoria_nombre } : null,
       posicion: r.posicion_nombre ? { id: safeNum(r.posicion_id), nombre: r.posicion_nombre } : null,
@@ -204,18 +230,13 @@ export default async function portal_apoderado(
   });
 
   /* ──────────────────────────────────────────────────────────────
-     GET /api/portal-apoderado/jugadores/:rut/resumen
-     - 1 endpoint: jugador + pagos + (opcional) estadisticas
-     - jugador viene enriquecido
-     - pagos vienen enriquecidos
-     - Incluye jugador.tiene_contrato (boolean)
+     GET /api/portal-apoderado/jugadores/:rut/foto
   ────────────────────────────────────────────────────────────── */
-  app.get("/jugadores/:rut/resumen", async (req, reply) => {
-    const tokenData = verifyApoderadoToken(req.headers.authorization);
-    if (!tokenData) return reply.code(401).send({ ok: false, message: "UNAUTHORIZED" });
+  app.get("/jugadores/:rut/foto", async (req, reply) => {
+    const auth = getApoderadoAuth(req, reply);
+    if (!auth) return;
 
-    const guard = await requireApoderadoPortalOk(tokenData.rut);
-    if (!guard.ok) return reply.code(guard.code).send({ ok: false, message: guard.message });
+    if (!(await assertGuardOrReply(auth.rut, reply))) return;
 
     const parsed = RutJugadorParam.safeParse(req.params);
     if (!parsed.success) return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
@@ -223,15 +244,81 @@ export default async function portal_apoderado(
     const rutJugador = parsed.data.rut;
     const db = getDb();
 
-    // valida pertenencia
-    const [own] = await db.query<any[]>(
-      `SELECT 1
-       FROM jugadores
-       WHERE rut_jugador = ? AND rut_apoderado = ?
-       LIMIT 1`,
-      [rutJugador, tokenData.rut]
+    const okOwn = await assertJugadorPertenece(db, rutJugador, auth.rut);
+    if (!okOwn) return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
+
+    const [rows] = await db.query<any[]>(
+      `SELECT foto_base64, foto_mime
+         FROM jugadores
+        WHERE rut_jugador = ?
+        LIMIT 1`,
+      [rutJugador]
     );
-    if (!own?.length) return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
+
+    const r = rows?.[0] ?? null;
+    if (!r) return reply.code(404).send({ ok: false, message: "NOT_FOUND" });
+
+    return reply.send({
+      ok: true,
+      foto_base64: r.foto_base64 ?? null,
+      foto_mime: r.foto_mime ?? null,
+    });
+  });
+
+  /* ──────────────────────────────────────────────────────────────
+     PATCH /api/portal-apoderado/jugadores/:rut/foto
+  ────────────────────────────────────────────────────────────── */
+  app.patch("/jugadores/:rut/foto", async (req, reply) => {
+    const auth = getApoderadoAuth(req, reply);
+    if (!auth) return;
+
+    if (!(await assertGuardOrReply(auth.rut, reply))) return;
+
+    const parsed = RutJugadorParam.safeParse(req.params);
+    if (!parsed.success) return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
+
+    const body = FotoBodySchema.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
+
+    const rutJugador = parsed.data.rut;
+    const db = getDb();
+
+    const okOwn = await assertJugadorPertenece(db, rutJugador, auth.rut);
+    if (!okOwn) return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
+
+    const fotoBase64 = body.data.foto_base64
+      ? String(body.data.foto_base64).replace(/\s+/g, "")
+      : null;
+
+    const fotoMime = body.data.foto_mime ? String(body.data.foto_mime).toLowerCase() : null;
+
+    await db.query(
+      `UPDATE jugadores
+          SET foto_base64 = ?, foto_mime = ?
+        WHERE rut_jugador = ?`,
+      [fotoBase64, fotoMime, rutJugador]
+    );
+
+    return reply.send({ ok: true });
+  });
+
+  /* ──────────────────────────────────────────────────────────────
+     GET /api/portal-apoderado/jugadores/:rut/resumen
+  ────────────────────────────────────────────────────────────── */
+  app.get("/jugadores/:rut/resumen", async (req, reply) => {
+    const auth = getApoderadoAuth(req, reply);
+    if (!auth) return;
+
+    if (!(await assertGuardOrReply(auth.rut, reply))) return;
+
+    const parsed = RutJugadorParam.safeParse(req.params);
+    if (!parsed.success) return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
+
+    const rutJugador = parsed.data.rut;
+    const db = getDb();
+
+    const okOwn = await assertJugadorPertenece(db, rutJugador, auth.rut);
+    if (!okOwn) return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
 
     const [jugRows] = await db.query<any[]>(
       `SELECT
@@ -259,11 +346,7 @@ export default async function portal_apoderado(
           j.estado_id,
           j.estadistica_id,
           j.sucursal_id,
-
-          -- bandera liviana
           (j.contrato_prestacion IS NOT NULL AND j.contrato_prestacion <> '') AS tiene_contrato,
-
-          -- Nombres de catálogos
           c.nombre  AS categoria_nombre,
           pz.nombre AS posicion_nombre,
           es.nombre AS estado_nombre,
@@ -271,16 +354,14 @@ export default async function portal_apoderado(
           co.nombre AS comuna_nombre,
           ee.nombre AS establec_educ_nombre,
           pm.nombre AS prevision_medica_nombre
-
        FROM jugadores j
-       LEFT JOIN categorias              c  ON c.id  = j.categoria_id
-       LEFT JOIN posiciones              pz ON pz.id = j.posicion_id
-       LEFT JOIN estado                  es ON es.id = j.estado_id
-       LEFT JOIN sucursales_real         sr ON sr.id = j.sucursal_id
-       LEFT JOIN comunas                 co ON co.id = j.comuna_id
-       LEFT JOIN establec_educ           ee ON ee.id = j.establec_educ_id
-       LEFT JOIN prevision_medica        pm ON pm.id = j.prevision_medica_id
-
+       LEFT JOIN categorias       c  ON c.id  = j.categoria_id
+       LEFT JOIN posiciones       pz ON pz.id = j.posicion_id
+       LEFT JOIN estado           es ON es.id = j.estado_id
+       LEFT JOIN sucursales_real  sr ON sr.id = j.sucursal_id
+       LEFT JOIN comunas          co ON co.id = j.comuna_id
+       LEFT JOIN establec_educ    ee ON ee.id = j.establec_educ_id
+       LEFT JOIN prevision_medica pm ON pm.id = j.prevision_medica_id
        WHERE j.rut_jugador = ?
        LIMIT 1`,
       [rutJugador]
@@ -314,21 +395,21 @@ export default async function portal_apoderado(
       estado_id: r.estado_id,
       estadistica_id: r.estadistica_id,
       sucursal_id: r.sucursal_id,
-
-      // ✅ solo bandera (NO base64)
       tiene_contrato: Boolean(r.tiene_contrato),
 
-      // objetos enriquecidos
       categoria: r.categoria_nombre ? { id: safeNum(r.categoria_id), nombre: r.categoria_nombre } : null,
       posicion: r.posicion_nombre ? { id: safeNum(r.posicion_id), nombre: r.posicion_nombre } : null,
       estado: r.estado_nombre ? { id: safeNum(r.estado_id), nombre: r.estado_nombre } : null,
       sucursal: r.sucursal_nombre ? { id: safeNum(r.sucursal_id), nombre: r.sucursal_nombre } : null,
       comuna: r.comuna_nombre ? { id: safeNum(r.comuna_id), nombre: r.comuna_nombre } : null,
-      establec_educ: r.establec_educ_nombre ? { id: safeNum(r.establec_educ_id), nombre: r.establec_educ_nombre } : null,
-      prevision_medica: r.prevision_medica_nombre ? { id: safeNum(r.prevision_medica_id), nombre: r.prevision_medica_nombre } : null,
+      establec_educ: r.establec_educ_nombre
+        ? { id: safeNum(r.establec_educ_id), nombre: r.establec_educ_nombre }
+        : null,
+      prevision_medica: r.prevision_medica_nombre
+        ? { id: safeNum(r.prevision_medica_id), nombre: r.prevision_medica_nombre }
+        : null,
     };
 
-    // pagos enriquecidos
     const [payRows] = await db.query<any[]>(
       `SELECT
           p.*,
@@ -359,12 +440,15 @@ export default async function portal_apoderado(
       situacion_pago: { id: x.sp_id ?? x.situacion_pago_id, nombre: x.sp_nombre ?? null },
     }));
 
-    // estadísticas (opcional)
     let estadisticas: any = null;
     if (r.estadistica_id) {
       try {
         const [st] = await db.query<any[]>(
-          `SELECT * FROM estadisticas WHERE id = ? LIMIT 1`,
+          `SELECT *
+             FROM estadisticas
+            WHERE estadistica_id = ?
+            ORDER BY id DESC
+            LIMIT 1`,
           [r.estadistica_id]
         );
         estadisticas = st?.[0] ?? null;
@@ -378,14 +462,12 @@ export default async function portal_apoderado(
 
   /* ──────────────────────────────────────────────────────────────
      GET /api/portal-apoderado/jugadores/:rut/contrato
-     - Devuelve PDF binario (application/pdf) para abrir en pestaña
   ────────────────────────────────────────────────────────────── */
   app.get("/jugadores/:rut/contrato", async (req, reply) => {
-    const tokenData = verifyApoderadoToken(req.headers.authorization);
-    if (!tokenData) return reply.code(401).send({ ok: false, message: "UNAUTHORIZED" });
+    const auth = getApoderadoAuth(req, reply);
+    if (!auth) return;
 
-    const guard = await requireApoderadoPortalOk(tokenData.rut);
-    if (!guard.ok) return reply.code(guard.code).send({ ok: false, message: guard.message });
+    if (!(await assertGuardOrReply(auth.rut, reply))) return;
 
     const parsed = RutJugadorParam.safeParse(req.params);
     if (!parsed.success) return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
@@ -393,22 +475,14 @@ export default async function portal_apoderado(
     const rutJugador = parsed.data.rut;
     const db = getDb();
 
-    // valida pertenencia
-    const [own] = await db.query<any[]>(
-      `SELECT 1
-       FROM jugadores
-       WHERE rut_jugador = ? AND rut_apoderado = ?
-       LIMIT 1`,
-      [rutJugador, tokenData.rut]
-    );
-    if (!own?.length) return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
+    const okOwn = await assertJugadorPertenece(db, rutJugador, auth.rut);
+    if (!okOwn) return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
 
-    // trae contrato
     const [rows] = await db.query<any[]>(
       `SELECT contrato_prestacion, contrato_prestacion_mime
-       FROM jugadores
-       WHERE rut_jugador = ?
-       LIMIT 1`,
+         FROM jugadores
+        WHERE rut_jugador = ?
+        LIMIT 1`,
       [rutJugador]
     );
 
@@ -424,16 +498,15 @@ export default async function portal_apoderado(
       return reply.code(415).send({ ok: false, message: "UNSUPPORTED_MEDIA_TYPE" });
     }
 
-    const clean = cleanBase64(r.contrato_prestacion);
+    const cleaned = cleanBase64(r.contrato_prestacion);
 
     let buf: Buffer;
     try {
-      buf = Buffer.from(clean, "base64");
+      buf = Buffer.from(cleaned, "base64");
     } catch {
       return reply.code(500).send({ ok: false, message: "CONTRATO_INVALIDO" });
     }
 
-    // headers para ver en navegador
     reply.header("Content-Type", "application/pdf");
     reply.header("Content-Disposition", `inline; filename="Contrato_${rutJugador}.pdf"`);
     reply.header("Cache-Control", "no-store, max-age=0");
@@ -443,37 +516,21 @@ export default async function portal_apoderado(
 
   /* ──────────────────────────────────────────────────────────────
      GET /api/portal-apoderado/jugadores/:rut/pagos
-     - Opcional si ya usas /resumen, pero lo dejamos.
   ────────────────────────────────────────────────────────────── */
   app.get("/jugadores/:rut/pagos", async (req, reply) => {
-    const tokenData = verifyApoderadoToken(req.headers.authorization);
-    if (!tokenData) {
-      return reply.code(401).send({ ok: false, message: "UNAUTHORIZED" });
-    }
+    const auth = getApoderadoAuth(req, reply);
+    if (!auth) return;
 
-    const guard = await requireApoderadoPortalOk(tokenData.rut);
-    if (!guard.ok) {
-      return reply.code(guard.code).send({ ok: false, message: guard.message });
-    }
+    if (!(await assertGuardOrReply(auth.rut, reply))) return;
 
     const parsed = RutJugadorParam.safeParse(req.params);
-    if (!parsed.success) {
-      return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
-    }
+    if (!parsed.success) return reply.code(400).send({ ok: false, message: "BAD_REQUEST" });
 
     const rutJugador = parsed.data.rut;
     const db = getDb();
 
-    const [own] = await db.query<any[]>(
-      `SELECT 1
-       FROM jugadores
-       WHERE rut_jugador = ? AND rut_apoderado = ?
-       LIMIT 1`,
-      [rutJugador, tokenData.rut]
-    );
-    if (!own?.length) {
-      return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
-    }
+    const okOwn = await assertJugadorPertenece(db, rutJugador, auth.rut);
+    if (!okOwn) return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
 
     const [payRows] = await db.query<any[]>(
       `SELECT

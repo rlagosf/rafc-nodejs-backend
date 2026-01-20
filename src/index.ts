@@ -168,6 +168,11 @@ async function bootstrap() {
     /^\/health(?:\/.*)?$/i,
     /^\/api\/health(?:\/.*)?$/i,
 
+    // ✅ EVENTOS PÚBLICOS (portal/landing)
+    /^\/api\/eventos\/public(?:\/.*)?$/i,
+    /^\/api\/eventos\/health(?:\/.*)?$/i,
+
+
     // LOGIN ADMIN
     /^\/auth\/login(?:\/.*)?$/i,
     /^\/api\/auth\/login(?:\/.*)?$/i,
@@ -192,8 +197,12 @@ async function bootstrap() {
     // Permite: /api/noticias, /api/noticias/123, etc.
     /^\/api\/noticias(?:\/.*)?$/i,
 
+    
+
     // (Opcional) si alguna vez sirves rutas sin /api
     /^\/noticias(?:\/.*)?$/i,
+
+    
   ];
 
   app.addHook('onRequest', async (req, reply) => {

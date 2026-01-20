@@ -1,17 +1,30 @@
 // src/middlewares/authz.ts
 import type { FastifyReply, FastifyRequest } from "fastify";
 import jwt from "jsonwebtoken";
-
-const JWT_SECRET = process.env.JWT_SECRET as string;
+import { CONFIG } from "../config";
 
 type AnyObj = Record<string, any>;
+type AuthContext =
+  | { type: "user"; user_id?: number; rol_id?: number }
+  | { type: "apoderado"; rut: string; apoderado_id?: number };
+
+function getJwtSecret() {
+  const s = CONFIG.JWT_SECRET;
+  if (!s) throw new Error("JWT_SECRET missing (CONFIG.JWT_SECRET)");
+  return s;
+}
 
 function extractUser(decoded: AnyObj): AnyObj {
   // soporta tokens donde vienen anidados
   return decoded?.user ?? decoded?.payload ?? decoded ?? {};
 }
 
-function extractRole(user: AnyObj): number | null {
+function toInt(v: any): number | undefined {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function extractRole(user: AnyObj): number | undefined {
   const raw =
     user?.rol_id ??
     user?.role_id ??
@@ -19,16 +32,13 @@ function extractRole(user: AnyObj): number | null {
     user?.rolId ??
     user?.rol ??
     user?.role ??
-    null;
+    undefined;
 
-  if (raw === null || raw === undefined) return null;
-
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : null;
+  return toInt(raw);
 }
 
 export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
-  const auth = req.headers.authorization || "";
+  const auth = String(req.headers.authorization || "");
   const [bearer, token] = auth.split(" ");
 
   if (bearer !== "Bearer" || !token) {
@@ -36,15 +46,46 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as AnyObj;
+    const decoded = jwt.verify(token, getJwtSecret()) as AnyObj;
     const user = extractUser(decoded);
 
-    // dejamos esto estable y único en toda la API:
-    (req as any).user = user;
-    (req as any).role_id = extractRole(user); // útil para debug
+    // --- Caso APODERADO (token: { type:"apoderado", rut, apoderado_id? }) ---
+    const type = String(user?.type ?? "").toLowerCase();
+    if (type === "apoderado") {
+      const rut = String(user?.rut ?? "");
+      if (!/^\d{8}$/.test(rut)) {
+        return reply.code(401).send({ ok: false, message: "INVALID_TOKEN" });
+      }
 
-  } catch (e) {
+      const apoderado_id = toInt(user?.apoderado_id);
+      (req as any).auth = { type: "apoderado", rut, apoderado_id } satisfies AuthContext;
+
+      // compat legacy
+      (req as any).user = user;
+
+      return;
+    }
+
+    // --- Caso ADMIN/STAFF (token con rol_id, user_id, etc) ---
+    const rol_id = extractRole(user);
+    const user_id = toInt(user?.user_id ?? user?.id ?? user?.uid);
+
+    (req as any).auth = { type: "user", user_id, rol_id } satisfies AuthContext;
+
+    // compat legacy
+    (req as any).user = user;
+    (req as any).role_id = rol_id ?? null;
+
+    return;
+  } catch {
     return reply.code(401).send({ ok: false, message: "INVALID_TOKEN" });
+  }
+}
+
+export async function requireApoderado(req: FastifyRequest, reply: FastifyReply) {
+  const a = (req as any).auth as AuthContext | undefined;
+  if (!a || a.type !== "apoderado") {
+    return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
   }
 }
 
@@ -52,14 +93,15 @@ export function requireRoles(allowed: number[]) {
   const set = new Set(allowed.map(Number));
 
   return async function (req: FastifyRequest, reply: FastifyReply) {
-    const user = (req as any).user ?? null;
-    const role = extractRole(user);
+    const a = (req as any).auth as AuthContext | undefined;
 
-    if (role == null || !set.has(role)) {
-      req.log.warn(
-        { role, userKeys: user ? Object.keys(user) : null },
-        "[authz] forbidden by role"
-      );
+    if (!a || a.type !== "user") {
+      return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
+    }
+
+    const role = Number(a.rol_id ?? 0);
+    if (!set.has(role)) {
+      req.log.warn({ role, allowed }, "[authz] forbidden by role");
       return reply.code(403).send({ ok: false, message: "FORBIDDEN" });
     }
   };
