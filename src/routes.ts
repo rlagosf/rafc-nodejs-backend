@@ -26,6 +26,7 @@ import convocatorias_historico from './routers/convocatorias_historico';
 import tipo_pago from './routers/tipo_pago';
 import situacion_pago from './routers/situacion_pago';
 import sucursales_real from './routers/sucursales_real';
+import gabriela from './gabriela';
 
 export async function registerRoutes(app: FastifyInstance) {
   // Prefijo base para toda la API
@@ -72,5 +73,8 @@ export async function registerRoutes(app: FastifyInstance) {
   // Noticias y administración de noticias
   app.register(admin_noticias, { prefix: `${API_BASE}/admin-noticias` });
   app.register(estado_noticias, { prefix: `${API_BASE}/estado-noticias` });
+
+  // IA médica - Gabriela
+  app.register(gabriela, { prefix: `${API_BASE}/gabriela` });
 
 }
