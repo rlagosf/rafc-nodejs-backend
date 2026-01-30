@@ -11,6 +11,14 @@ import { CONFIG } from "../config";
 const ALLOWED_PANEL_ROLES = new Set([1, 2]); // 1=admin, 2=staff
 const ACTIVE_ESTADO_ID = 1;
 
+// ✅ Identidad JWT (purga de "rafc"): configurable por env / CONFIG
+// - Define JWT_ISSUER y JWT_AUDIENCE en tu config o .env si quieres valores específicos
+// - Fallbacks neutros para no romper login si aún no los agregas
+const JWT_ISSUER =
+  String((CONFIG as any)?.JWT_ISSUER ?? process.env.JWT_ISSUER ?? "app").trim();
+const JWT_AUDIENCE =
+  String((CONFIG as any)?.JWT_AUDIENCE ?? process.env.JWT_AUDIENCE ?? "web").trim();
+
 // Perf log opcional: AUTH_PERF_LOG=1
 const PERF_LOG =
   String((CONFIG as any)?.AUTH_PERF_LOG ?? process.env.AUTH_PERF_LOG ?? "0") === "1";
@@ -150,8 +158,8 @@ async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   let decoded: any;
   try {
     decoded = jwt.verify(token, CONFIG.JWT_SECRET, {
-      issuer: "rafc",
-      audience: "rafc-web",
+      issuer: JWT_ISSUER,
+      audience: JWT_AUDIENCE,
     });
   } catch {
     fireAndForgetAudit("invalid_token", req, 401, null, { reason: "jwt_verify_failed" });
@@ -320,18 +328,18 @@ export default async function auth(app: FastifyInstance) {
         };
 
         const signOpts: SignOptions = {
-          issuer: "rafc",
-          audience: "rafc-web",
+          issuer: JWT_ISSUER,
+          audience: JWT_AUDIENCE,
           expiresIn: (CONFIG.JWT_EXPIRES_IN as any) || "12h",
         };
 
-        const rafc_token = jwt.sign(payload, CONFIG.JWT_SECRET, signOpts);
+        const token = jwt.sign(payload, CONFIG.JWT_SECRET, signOpts);
 
         fireAndForgetAudit("login", req, 200, user.id, { ok: true });
 
         return reply.send({
           ok: true,
-          rafc_token,
+          token,
           rol_id: rol,
           user: {
             id: user.id,
@@ -352,9 +360,13 @@ export default async function auth(app: FastifyInstance) {
     }
   );
 
-  app.post("/logout", { preHandler: [requireAuth] }, async (req: FastifyRequest, reply: FastifyReply) => {
-    const userId = (req as any).user?.id ?? null;
-    fireAndForgetAudit("logout", req, 200, userId);
-    return reply.send({ ok: true, message: "logout" });
-  });
+  app.post(
+    "/logout",
+    { preHandler: [requireAuth] },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const userId = (req as any).user?.id ?? null;
+      fireAndForgetAudit("logout", req, 200, userId);
+      return reply.send({ ok: true, message: "logout" });
+    }
+  );
 }

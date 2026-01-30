@@ -1,5 +1,5 @@
 {
-  "name": "rafc-backend",
+  "name": "weli-backend",
   "version": "1.0.0",
   "description": "Backend oficial de Real Academy FC Reload (Node.js + Fastify + TypeScript)",
   "type": "commonjs",
@@ -43,5 +43,5 @@
     "package-lock.json"
   ],
   "license": "MIT",
-  "author": "Real Academy FC <rodrigo.lagos.fernandez@gmail.com>"
+  "author": "WELI APP <rodrigo.lagos.fernandez@gmail.com>"
 }

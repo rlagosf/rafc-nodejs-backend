@@ -8,6 +8,14 @@ import { CONFIG } from "../config";
 
 const JWT_SECRET = CONFIG.JWT_SECRET;
 
+// ✅ Identidad JWT (purga de "rafc"): configurable por env / CONFIG
+// - Puedes definir JWT_ISSUER y JWT_AUDIENCE en tu config o .env
+// - Fallbacks neutros para no romper el login si aún no los agregas
+const JWT_ISSUER =
+  String((CONFIG as any)?.JWT_ISSUER ?? process.env.JWT_ISSUER ?? "app").trim();
+const JWT_AUDIENCE =
+  String((CONFIG as any)?.JWT_AUDIENCE ?? process.env.JWT_AUDIENCE ?? "web").trim();
+
 // ✅ Activa logs de performance solo si lo deseas:
 // export AUTH_PERF_LOG=1  (o en .env)
 const PERF_LOG =
@@ -36,10 +44,13 @@ type ApoderadoToken = { type: "apoderado"; apoderado_id: number; rut: string };
 ────────────────────────────────────────────────────────────── */
 function signApoderadoToken(payload: ApoderadoToken) {
   if (!JWT_SECRET) throw new Error("JWT_SECRET missing");
+  if (!JWT_ISSUER) throw new Error("JWT_ISSUER missing");
+  if (!JWT_AUDIENCE) throw new Error("JWT_AUDIENCE missing");
+
   return jwt.sign(payload, JWT_SECRET, {
     expiresIn: "12h",
-    issuer: "rafc",
-    audience: "rafc-web",
+    issuer: JWT_ISSUER,
+    audience: JWT_AUDIENCE,
   });
 }
 
@@ -50,8 +61,8 @@ function verifyApoderadoToken(authHeader?: string): ApoderadoToken | null {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET, {
-      issuer: "rafc",
-      audience: "rafc-web",
+      issuer: JWT_ISSUER,
+      audience: JWT_AUDIENCE,
     }) as any;
 
     if (decoded?.type !== "apoderado") return null;
@@ -296,8 +307,6 @@ export default async function auth_apoderado(
     }
     const t2b = Date.now();
 
-    // (Si quieres ver exclusivamente el tiempo de argon2.verify)
-    // ✅ Esto es "la prueba de argon2" pedida.
     if (PERF_LOG) {
       console.log("[AUTH_APODERADO PERF]", {
         rut,
@@ -330,7 +339,7 @@ export default async function auth_apoderado(
     }
 
     // 3) JWT: incluye apoderado_id => endpoints protegidos más rápidos
-    const rafc_token = signApoderadoToken({
+    const token = signApoderadoToken({
       type: "apoderado",
       rut,
       apoderado_id: Number(auth.apoderado_id),
@@ -378,7 +387,7 @@ export default async function auth_apoderado(
 
     return reply.send({
       ok: true,
-      rafc_token,
+      token,
       must_change_password: Number(auth.must_change_password) === 1,
     });
   });
